@@ -196,8 +196,8 @@ class TranscriptionManager: ObservableObject {
         let settings = SettingsService.shared.settings
         
         // Check user preference
-        if let preferredService = settings.preferredTranscriptionService {
-            return preferredService
+        if settings.preferredTranscriptionService != Optional.none {
+            return settings.preferredTranscriptionService ?? TranscriptionService.apple
         }
         
         // Auto-select based on availability and network

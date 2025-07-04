@@ -8,6 +8,8 @@
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app needs microphone access to record audio sessions.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>This app needs speech recognition to transcribe your audio.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
