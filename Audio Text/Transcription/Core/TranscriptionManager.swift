@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import BackgroundTasks
+import UIKit
 
 class TranscriptionManager: ObservableObject {
     static let shared = TranscriptionManager()

@@ -5,7 +5,7 @@ struct TranscriptionSegment: Identifiable, Codable {
     let sessionId: UUID
     let segmentIndex: Int
     let startTime: TimeInterval
-    let endTime: TimeInterval
+    var endTime: TimeInterval
     var audioFileURL: URL?
     var transcriptionText: String?
     var confidence: Float?

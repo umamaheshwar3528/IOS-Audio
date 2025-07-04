@@ -193,7 +193,12 @@ class AppleTranscriptionService: NSObject, ObservableObject {
     
     private func processRecognitionResult(_ result: SFSpeechRecognitionResult) -> AppleSpeechResult {
         let bestTranscription = result.bestTranscription
-        let confidence = Float(bestTranscription.segments.map { $0.confidence }.reduce(0, +) / Double(bestTranscription.segments.count))
+        
+        // Break down complex confidence calculation
+        let confidenceValues = bestTranscription.segments.map { $0.confidence }
+        let confidenceSum = confidenceValues.reduce(0, +)
+        let averageConfidence = Double(confidenceSum) / Double(bestTranscription.segments.count)
+        let confidence = Float(averageConfidence)
         
         // Extract segments with timing information
         let segments = bestTranscription.segments.map { segment in
