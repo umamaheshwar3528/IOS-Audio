@@ -21,17 +21,22 @@ class TranscriptionManager: ObservableObject {
     private let networkMonitor = NetworkMonitorService.shared
     
     // Background processing
-    private let backgroundTaskService = BackgroundTaskService.shared
     private var backgroundTaskIdentifier: UIBackgroundTaskIdentifier = .invalid
     
     // Concurrency control
     private let processingQueue = DispatchQueue(label: "transcription.processing", qos: .userInitiated)
     private let maxConcurrentTranscriptions = TranscriptionConstants.maxConcurrentTranscriptions
     private var activeTranscriptionTasks: Set<UUID> = []
+    private let activeTasksQueue = DispatchQueue(label: "transcription.activeTasks", attributes: .concurrent)
     
     // State management
     private var cancellables = Set<AnyCancellable>()
     private var jobTimers: [UUID: Timer] = [:]
+    private let jobTimersQueue = DispatchQueue(label: "transcription.jobTimers", attributes: .concurrent)
+    
+    // Track segments being processed to prevent duplicate processing
+    private var processingSegments: Set<UUID> = []
+    private let processingSegmentsQueue = DispatchQueue(label: "transcription.processingSegments", attributes: .concurrent)
     
     private init() {
         setupNotificationObservers()
@@ -44,15 +49,24 @@ class TranscriptionManager: ObservableObject {
     func startTranscriptionJob(for session: RecordingSession) -> TranscriptionJob {
         Logger.shared.info("Starting transcription job for session: \(session.id)")
         
+        // Check if job already exists
+        if let existingJob = activeJobs.first(where: { $0.sessionId == session.id }) {
+            Logger.shared.info("Job already exists for session: \(session.id)")
+            return existingJob
+        }
+        
         let job = TranscriptionJob(
             sessionId: session.id,
             preferredService: determinePreferredService(),
             allowFallback: SettingsService.shared.settings.allowServiceFallback
         )
         
-        activeJobs.append(job)
-        isProcessing = true
-        processingStatus = "Starting transcription..."
+        // Update on main thread
+        DispatchQueue.main.async { [weak self] in
+            self?.activeJobs.append(job)
+            self?.isProcessing = true
+            self?.processingStatus = "Starting transcription..."
+        }
         
         // Start job monitoring
         startJobMonitoring(for: job)
@@ -60,31 +74,44 @@ class TranscriptionManager: ObservableObject {
         // Begin background task for continuous processing
         beginBackgroundProcessing()
         
+        // Trigger immediate segment processing if segments are already available
+        processExistingSegments(for: session.id)
+        
+        // Save state
+        saveJobsState()
+        
         return job
     }
     
-    func stopTranscriptionJob(_ jobId: UUID) {
-        Logger.shared.info("Stopping transcription job: \(jobId)")
+    func stopTranscriptionJob(_ sessionId: UUID) {
+        Logger.shared.info("Stopping transcription job for session: \(sessionId)")
         
-        if let index = activeJobs.firstIndex(where: { $0.id == jobId }) {
+        if let index = activeJobs.firstIndex(where: { $0.sessionId == sessionId }) {
             var job = activeJobs[index]
             job.markAsCompleted()
             
-            activeJobs.remove(at: index)
-            completedJobs.append(job)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.activeJobs.remove(at: index)
+                self.completedJobs.append(job)
+            }
             
             // Cancel any pending segments for this job
-            cancelPendingSegments(for: job.sessionId)
+            cancelPendingSegments(for: sessionId)
             
             // Stop job monitoring
-            stopJobMonitoring(for: jobId)
+            stopJobMonitoring(for: job.id)
         }
         
         updateProcessingState()
+        saveJobsState()
     }
     
     func retryFailedSegments(for jobId: UUID) async {
-        guard let jobIndex = activeJobs.firstIndex(where: { $0.id == jobId }) else { return }
+        guard let jobIndex = activeJobs.firstIndex(where: { $0.id == jobId }) else {
+            Logger.shared.warning("Job not found for retry: \(jobId)")
+            return
+        }
         
         let job = activeJobs[jobIndex]
         let failedSegments = job.segments.filter { $0.status == .failed && $0.needsRetry }
@@ -94,19 +121,22 @@ class TranscriptionManager: ObservableObject {
         for segment in failedSegments {
             var updatedSegment = segment
             updatedSegment.status = .pending
+            updatedSegment.errorMessage = nil
             queueManager.addSegment(updatedSegment)
         }
     }
     
     func getTranscriptionText(for sessionId: UUID) -> String? {
-        // Check active jobs first
-        if let activeJob = activeJobs.first(where: { $0.sessionId == sessionId }) {
-            return activeJob.fullTranscriptionText.isEmpty ? nil : activeJob.fullTranscriptionText
+        // Check completed jobs first (they have finalized text)
+        if let completedJob = completedJobs.first(where: { $0.sessionId == sessionId }) {
+            let text = completedJob.fullTranscriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
         }
         
-        // Check completed jobs
-        if let completedJob = completedJobs.first(where: { $0.sessionId == sessionId }) {
-            return completedJob.fullTranscriptionText.isEmpty ? nil : completedJob.fullTranscriptionText
+        // Check active jobs
+        if let activeJob = activeJobs.first(where: { $0.sessionId == sessionId }) {
+            let text = activeJob.fullTranscriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
         }
         
         return nil
@@ -114,13 +144,50 @@ class TranscriptionManager: ObservableObject {
     
     // MARK: - Segment Processing Workflow
     
+    private func processExistingSegments(for sessionId: UUID) {
+        // Check if there are already segments for this session in the queue
+        let existingSegments = queueManager.pendingSegments.filter { $0.sessionId == sessionId }
+        
+        if !existingSegments.isEmpty {
+            Logger.shared.info("Found \(existingSegments.count) existing segments for session \(sessionId)")
+            
+            // Add segments to the job
+            if let jobIndex = activeJobs.firstIndex(where: { $0.sessionId == sessionId }) {
+                for segment in existingSegments {
+                    activeJobs[jobIndex].addSegment(segment)
+                }
+            }
+            
+            // Start processing
+            processQueuedSegments()
+        }
+    }
+    
     private func processNextSegment(_ segment: TranscriptionSegment) {
-        guard activeTranscriptionTasks.count < maxConcurrentTranscriptions else {
-            // Queue is full, segment will be processed later
+        // Check if we're already processing this segment
+        let isAlreadyProcessing = processingSegmentsQueue.sync {
+            return processingSegments.contains(segment.id)
+        }
+        
+        if isAlreadyProcessing {
+            Logger.shared.debug("Segment \(segment.segmentIndex) is already being processed, skipping")
             return
         }
         
-        activeTranscriptionTasks.insert(segment.id)
+        let currentTaskCount = activeTasksQueue.sync { activeTranscriptionTasks.count }
+        guard currentTaskCount < maxConcurrentTranscriptions else {
+            Logger.shared.debug("Max concurrent transcriptions reached, queuing segment \(segment.segmentIndex)")
+            return
+        }
+        
+        // Mark as processing
+        processingSegmentsQueue.async(flags: .barrier) { [weak self] in
+            self?.processingSegments.insert(segment.id)
+        }
+        
+        activeTasksQueue.async(flags: .barrier) { [weak self] in
+            self?.activeTranscriptionTasks.insert(segment.id)
+        }
         
         Task {
             await transcribeSegment(segment)
@@ -140,11 +207,17 @@ class TranscriptionManager: ObservableObject {
             handleTranscriptionFailure(segment, error: error)
         }
         
-        // Remove from active tasks
-        activeTranscriptionTasks.remove(segment.id)
+        // Remove from active tasks and processing segments
+        activeTasksQueue.async(flags: .barrier) { [weak self] in
+            self?.activeTranscriptionTasks.remove(segment.id)
+        }
+        
+        processingSegmentsQueue.async(flags: .barrier) { [weak self] in
+            self?.processingSegments.remove(segment.id)
+        }
         
         // Update job progress
-        updateJobProgress(for: segment.sessionId)
+        await updateJobProgress(for: segment.sessionId)
         
         // Process next segment if queue has more
         DispatchQueue.main.async {
@@ -163,6 +236,11 @@ class TranscriptionManager: ObservableObject {
             } catch {
                 Logger.shared.warning("Transcription failed with \(service.displayName): \(error)")
                 
+                // Check if this is a permanent failure
+                if isPermanentFailure(error) {
+                    throw error
+                }
+                
                 // If this was the last service, throw the error
                 if service == services.last {
                     throw error
@@ -174,6 +252,31 @@ class TranscriptionManager: ObservableObject {
         }
         
         throw TranscriptionError.allServicesFailed
+    }
+    
+    private func isPermanentFailure(_ error: Error) -> Bool {
+        if let appleSpeechError = error as? AppleSpeechError {
+            switch appleSpeechError {
+            case .recognitionFailed(let message):
+                // "No speech detected" should be permanent
+                return message.contains("No speech detected") || message.contains("no speech")
+            case .authorizationDenied, .recognizerUnavailable:
+                return true
+            default:
+                return false
+            }
+        }
+        
+        if let transcriptionError = error as? TranscriptionError {
+            switch transcriptionError {
+            case .missingAudioFile, .fileTooLarge, .unauthorized:
+                return true
+            default:
+                return false
+            }
+        }
+        
+        return false
     }
     
     private func transcribeWithService(_ segment: TranscriptionSegment, service: TranscriptionService) async throws -> TranscriptionResponse {
@@ -196,8 +299,8 @@ class TranscriptionManager: ObservableObject {
         let settings = SettingsService.shared.settings
         
         // Check user preference
-        if settings.preferredTranscriptionService != Optional.none {
-            return settings.preferredTranscriptionService ?? TranscriptionService.apple
+        if let preferredService = settings.preferredTranscriptionService {
+            return preferredService
         }
         
         // Auto-select based on availability and network
@@ -264,6 +367,9 @@ class TranscriptionManager: ObservableObject {
         queueManager.moveSegmentToCompleted(updatedSegment)
         updateJobSegment(updatedSegment)
         
+        // Mark retry as successful if this was a retry
+        retryManager.markRetrySuccessful(for: segment.id)
+        
         // Post success notification
         NotificationCenter.default.post(
             name: .init("segmentTranscriptionCompleted"),
@@ -280,22 +386,27 @@ class TranscriptionManager: ObservableObject {
             service: .none
         )
         
-        // Check if we should retry
-        if updatedSegment.needsRetry {
-            // Schedule retry with exponential backoff
-            retryManager.scheduleRetry(for: updatedSegment) { [weak self] retrySegment in
-                self?.queueManager.addSegment(retrySegment)
-            }
-        } else {
+        // Check if this is a permanent failure or if we've exceeded retry attempts
+        let isPermanent = isPermanentFailure(error) || !updatedSegment.needsRetry
+        
+        if isPermanent {
             // Move to failed permanently
             queueManager.moveSegmentToFailed(updatedSegment)
             updateJobSegment(updatedSegment)
+            retryManager.markRetryPermanentlyFailed(for: segment.id)
+            
+            Logger.shared.info("Segment \(segment.segmentIndex) marked as permanently failed: \(error.localizedDescription)")
             
             // Post failure notification
             NotificationCenter.default.post(
                 name: .init("segmentTranscriptionFailed"),
                 object: updatedSegment
             )
+        } else {
+            // Schedule retry with exponential backoff
+            retryManager.scheduleRetry(for: updatedSegment) { [weak self] retrySegment in
+                self?.queueManager.addSegment(retrySegment)
+            }
         }
     }
     
@@ -304,17 +415,23 @@ class TranscriptionManager: ObservableObject {
     private func updateJobSegment(_ segment: TranscriptionSegment) {
         if let jobIndex = activeJobs.firstIndex(where: { $0.sessionId == segment.sessionId }) {
             activeJobs[jobIndex].updateSegment(segment)
+            
+            // Trigger UI update on main thread
+            DispatchQueue.main.async { [weak self] in
+                self?.objectWillChange.send()
+            }
+            
             saveJobsState()
         }
     }
     
-    private func updateJobProgress(for sessionId: UUID) {
+    private func updateJobProgress(for sessionId: UUID) async {
         guard let jobIndex = activeJobs.firstIndex(where: { $0.sessionId == sessionId }) else { return }
         
         let job = activeJobs[jobIndex]
         let progress = job.progress
         
-        DispatchQueue.main.async {
+        await MainActor.run {
             self.currentProgress = progress
             self.processingStatus = "Transcribing... \(Int(progress * 100))%"
             
@@ -331,17 +448,24 @@ class TranscriptionManager: ObservableObject {
         var completedJob = job
         completedJob.markAsCompleted()
         
-        // Move from active to completed
-        if let index = activeJobs.firstIndex(where: { $0.id == job.id }) {
-            activeJobs.remove(at: index)
+        // Move from active to completed on main thread
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            if let index = self.activeJobs.firstIndex(where: { $0.id == job.id }) {
+                self.activeJobs.remove(at: index)
+            }
+            self.completedJobs.append(completedJob)
         }
-        completedJobs.append(completedJob)
         
         // Stop monitoring
         stopJobMonitoring(for: job.id)
         
         // Update processing state
         updateProcessingState()
+        
+        // Save state
+        saveJobsState()
         
         // Post completion notification
         NotificationCenter.default.post(
@@ -351,28 +475,43 @@ class TranscriptionManager: ObservableObject {
     }
     
     private func startJobMonitoring(for job: TranscriptionJob) {
-        let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            self?.monitorJobProgress(job.id)
+        DispatchQueue.main.async { [weak self] in
+            let timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+                self?.monitorJobProgress(job.id)
+            }
+            
+            self?.jobTimersQueue.async(flags: .barrier) {
+                self?.jobTimers[job.id] = timer
+            }
         }
-        jobTimers[job.id] = timer
     }
     
     private func stopJobMonitoring(for jobId: UUID) {
-        jobTimers[jobId]?.invalidate()
-        jobTimers.removeValue(forKey: jobId)
+        jobTimersQueue.async(flags: .barrier) { [weak self] in
+            self?.jobTimers[jobId]?.invalidate()
+            self?.jobTimers.removeValue(forKey: jobId)
+        }
     }
     
     private func monitorJobProgress(_ jobId: UUID) {
         guard let job = activeJobs.first(where: { $0.id == jobId }) else { return }
         
-        // Check for stalled segments
+        // Only check for truly stalled segments (not being actively processed)
         let stalledSegments = job.segments.filter { segment in
-            segment.status == .processing &&
-            Date().timeIntervalSince(segment.createdAt) > TranscriptionConstants.apiTimeout
+            let isProcessing = processingSegmentsQueue.sync {
+                return processingSegments.contains(segment.id)
+            }
+            
+            // Only consider it stalled if:
+            // 1. Status is processing BUT it's not in our active processing set
+            // 2. It's been too long since creation
+            return segment.status == .processing &&
+                   !isProcessing &&
+                   Date().timeIntervalSince(segment.createdAt) > (TranscriptionConstants.apiTimeout * 2)
         }
         
         for segment in stalledSegments {
-            Logger.shared.warning("Segment \(segment.segmentIndex) appears stalled, marking for retry")
+            Logger.shared.warning("Segment \(segment.segmentIndex) appears truly stalled, marking for retry")
             handleTranscriptionFailure(segment, error: TranscriptionError.processingTimeout)
         }
     }
@@ -380,7 +519,8 @@ class TranscriptionManager: ObservableObject {
     // MARK: - Queue Processing
     
     private func processQueuedSegments() {
-        let availableSlots = maxConcurrentTranscriptions - activeTranscriptionTasks.count
+        let currentTaskCount = activeTasksQueue.sync { activeTranscriptionTasks.count }
+        let availableSlots = maxConcurrentTranscriptions - currentTaskCount
         guard availableSlots > 0 else { return }
         
         let pendingSegments = Array(queueManager.pendingSegments.prefix(availableSlots))
@@ -425,6 +565,11 @@ class TranscriptionManager: ObservableObject {
         }
         
         Logger.shared.info("Started background transcription processing")
+        
+        // Auto-end background task after 25 seconds to avoid iOS termination
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25.0) { [weak self] in
+            self?.endBackgroundProcessing()
+        }
     }
     
     private func endBackgroundProcessing() {
@@ -438,14 +583,17 @@ class TranscriptionManager: ObservableObject {
     
     private func updateProcessingState() {
         let hasActiveJobs = !activeJobs.isEmpty
-        let hasActiveTranscriptions = !activeTranscriptionTasks.isEmpty
+        let currentTaskCount = activeTasksQueue.sync { activeTranscriptionTasks.count }
+        let hasActiveTranscriptions = currentTaskCount > 0
         
-        isProcessing = hasActiveJobs || hasActiveTranscriptions
-        
-        if !isProcessing {
-            processingStatus = "Ready"
-            currentProgress = 0.0
-            endBackgroundProcessing()
+        DispatchQueue.main.async { [weak self] in
+            self?.isProcessing = hasActiveJobs || hasActiveTranscriptions
+            
+            if !(hasActiveJobs || hasActiveTranscriptions) {
+                self?.processingStatus = "Ready"
+                self?.currentProgress = 0.0
+                self?.endBackgroundProcessing()
+            }
         }
     }
     
@@ -474,7 +622,7 @@ class TranscriptionManager: ObservableObject {
         }
         
         updateProcessingState()
-        Logger.shared.info("Loaded \(activeJobs.count) active transcription jobs")
+        Logger.shared.info("Loaded \(activeJobs.count) active and \(completedJobs.count) completed transcription jobs")
     }
     
     // MARK: - Notification Observers
@@ -523,6 +671,7 @@ class TranscriptionManager: ObservableObject {
     private func setupCombineObservers() {
         // Monitor network connectivity changes
         networkMonitor.$isConnected
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] isConnected in
                 self?.handleNetworkStatusChange(isConnected)
             }
@@ -565,11 +714,17 @@ class TranscriptionManager: ObservableObject {
     private func handleAppDidEnterBackground() {
         Logger.shared.info("App entered background, scheduling background transcription")
         beginBackgroundProcessing()
+        saveJobsState()
     }
     
     private func handleAppWillEnterForeground() {
         Logger.shared.info("App entering foreground, resuming transcription processing")
         processQueuedSegments()
+        
+        // Refresh UI
+        DispatchQueue.main.async {
+            self.objectWillChange.send()
+        }
     }
 }
 
@@ -586,18 +741,4 @@ extension TranscriptionError {
     static let allServicesFailed = TranscriptionError.apiError("All transcription services failed")
     static let serviceNotImplemented = TranscriptionError.apiError("Service not implemented")
     static let noServiceSelected = TranscriptionError.apiError("No transcription service selected")
-}
-
-// MARK: - Settings Extension for Transcription
-
-extension SettingsService {
-    var allowServiceFallback: Bool {
-        // This would be added to RecordingSettings
-        return true // Default to allowing fallback
-    }
-    
-    var preferredTranscriptionService: TranscriptionService? {
-        // This would be added to RecordingSettings
-        return nil // Auto-select by default
-    }
 }

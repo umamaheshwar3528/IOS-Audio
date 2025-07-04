@@ -7,8 +7,10 @@ class RetryManager: ObservableObject {
     @Published var activeRetries: [UUID: RetryInfo] = [:]
     @Published var retryStatistics = RetryStatistics()
     
+    // Thread-safe timer management
     private var retryTimers: [UUID: Timer] = [:]
-    private let retryQueue = DispatchQueue(label: "retry.manager", qos: .utility)
+    private let timersQueue = DispatchQueue(label: "retry.timers", attributes: .concurrent)
+    private let statisticsQueue = DispatchQueue(label: "retry.statistics")
     
     struct RetryInfo {
         let segmentId: UUID
@@ -36,13 +38,32 @@ class RetryManager: ObservableObject {
         }
     }
     
-    private init() {}
+    private init() {
+        Logger.shared.info("RetryManager initialized")
+    }
+    
+    deinit {
+        cancelAllRetries()
+    }
     
     // MARK: - Public Interface
     
     func scheduleRetry(for segment: TranscriptionSegment, completion: @escaping (TranscriptionSegment) -> Void) {
+        // Validate retry eligibility first
         guard segment.needsRetry else {
-            Logger.shared.warning("Segment \(segment.segmentIndex) does not need retry")
+            Logger.shared.warning("Segment \(segment.segmentIndex) does not need retry (count: \(segment.retryCount), permanent: \(segment.isPermanentFailure))")
+            return
+        }
+        
+        // Validate segment ID
+        guard segment.id != UUID(uuidString: "00000000-0000-0000-0000-000000000000") else {
+            Logger.shared.error("Invalid segment ID detected, skipping retry")
+            return
+        }
+        
+        // Check if we're already retrying this segment
+        if activeRetries[segment.id] != nil {
+            Logger.shared.warning("Retry already scheduled for segment \(segment.segmentIndex), skipping duplicate")
             return
         }
         
@@ -57,48 +78,122 @@ class RetryManager: ObservableObject {
             service: segment.service
         )
         
-        activeRetries[segment.id] = retryInfo
+        Logger.shared.info("Scheduling retry for segment \(segment.segmentIndex) (ID: \(segment.id.uuidString.prefix(8))) in \(String(format: "%.2f", retryDelay)) seconds (attempt \(retryInfo.currentAttempt)/\(TranscriptionConstants.maxRetryAttempts))")
         
-        Logger.shared.info("Scheduling retry for segment \(segment.segmentIndex) in \(retryDelay) seconds")
-        
-        // Schedule timer for retry
-        let timer = Timer.scheduledTimer(withTimeInterval: retryDelay, repeats: false) { [weak self] _ in
-            self?.executeRetry(for: segment, completion: completion)
+        // Update active retries on main queue
+        DispatchQueue.main.async { [weak self] in
+            self?.activeRetries[segment.id] = retryInfo
         }
         
-        retryTimers[segment.id] = timer
-        retryStatistics.totalRetries += 1
+        // Update statistics
+        statisticsQueue.async { [weak self] in
+            self?.retryStatistics.totalRetries += 1
+            
+            // Update published statistics on main queue
+            DispatchQueue.main.async {
+                self?.objectWillChange.send()
+            }
+        }
+        
+        // Schedule timer safely
+        scheduleTimerSafely(for: segment, delay: retryDelay, completion: completion)
     }
     
     func cancelRetry(for segmentId: UUID) {
-        Logger.shared.info("Cancelling retry for segment: \(segmentId)")
+        Logger.shared.info("Cancelling retry for segment: \(segmentId.uuidString.prefix(8))")
         
-        retryTimers[segmentId]?.invalidate()
-        retryTimers.removeValue(forKey: segmentId)
-        activeRetries.removeValue(forKey: segmentId)
+        // Cancel timer safely
+        timersQueue.async(flags: .barrier) { [weak self] in
+            if let timer = self?.retryTimers[segmentId] {
+                timer.invalidate()
+                self?.retryTimers.removeValue(forKey: segmentId)
+            }
+        }
+        
+        // Remove from active retries on main queue
+        DispatchQueue.main.async { [weak self] in
+            self?.activeRetries.removeValue(forKey: segmentId)
+        }
     }
     
     func markRetrySuccessful(for segmentId: UUID) {
-        if activeRetries[segmentId] != nil {
-            retryStatistics.successfulRetries += 1
-            updateAverageRetries()
+        Logger.shared.info("Marking retry successful for segment: \(segmentId.uuidString.prefix(8))")
+        
+        let wasActive = activeRetries[segmentId] != nil
+        
+        if wasActive {
+            statisticsQueue.async { [weak self] in
+                self?.retryStatistics.successfulRetries += 1
+                self?.updateAverageRetries()
+                
+                // Update published statistics on main queue
+                DispatchQueue.main.async {
+                    self?.objectWillChange.send()
+                }
+            }
         }
         
         cancelRetry(for: segmentId)
     }
     
     func markRetryPermanentlyFailed(for segmentId: UUID) {
-        if activeRetries[segmentId] != nil {
-            retryStatistics.permanentFailures += 1
+        Logger.shared.info("Marking retry permanently failed for segment: \(segmentId.uuidString.prefix(8))")
+        
+        let wasActive = activeRetries[segmentId] != nil
+        
+        if wasActive {
+            statisticsQueue.async { [weak self] in
+                self?.retryStatistics.permanentFailures += 1
+                
+                // Update published statistics on main queue
+                DispatchQueue.main.async {
+                    self?.objectWillChange.send()
+                }
+            }
         }
         
         cancelRetry(for: segmentId)
     }
     
+    func cancelAllRetries() {
+        Logger.shared.info("Cancelling all active retries")
+        
+        // Cancel all timers safely
+        timersQueue.async(flags: .barrier) { [weak self] in
+            guard let self = self else { return }
+            
+            for (_, timer) in self.retryTimers {
+                timer.invalidate()
+            }
+            self.retryTimers.removeAll()
+        }
+        
+        // Clear active retries on main queue
+        DispatchQueue.main.async { [weak self] in
+            self?.activeRetries.removeAll()
+        }
+    }
+    
     // MARK: - Private Implementation
     
+    private func scheduleTimerSafely(for segment: TranscriptionSegment, delay: TimeInterval, completion: @escaping (TranscriptionSegment) -> Void) {
+        // Create timer on main queue (Timer requirement)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                self?.executeRetry(for: segment, completion: completion)
+            }
+            
+            // Store timer safely
+            self.timersQueue.async(flags: .barrier) {
+                self.retryTimers[segment.id] = timer
+            }
+        }
+    }
+    
     private func calculateRetryDelay(for segment: TranscriptionSegment) -> TimeInterval {
-        let attempt = segment.retryCount + 1
+        let attempt = max(1, segment.retryCount + 1) // Ensure minimum of 1
         let baseDelay = TranscriptionConstants.baseRetryDelay
         let multiplier = pow(TranscriptionConstants.retryMultiplier, Double(attempt - 1))
         
@@ -106,21 +201,30 @@ class RetryManager: ObservableObject {
         let jitter = Double.random(in: 0.8...1.2)
         let delay = baseDelay * multiplier * jitter
         
-        return min(delay, TranscriptionConstants.maxRetryDelay)
+        return min(max(delay, 1.0), TranscriptionConstants.maxRetryDelay) // Minimum 1 second
     }
     
     private func executeRetry(for segment: TranscriptionSegment, completion: @escaping (TranscriptionSegment) -> Void) {
-        Logger.shared.info("Executing retry for segment \(segment.segmentIndex)")
+        Logger.shared.info("Executing retry for segment \(segment.segmentIndex) (ID: \(segment.id.uuidString.prefix(8)))")
         
         var retrySegment = segment
         retrySegment.status = .pending
         retrySegment.errorMessage = nil
         
-        // Remove from active retries since we're processing now
-        activeRetries.removeValue(forKey: segment.id)
-        retryTimers.removeValue(forKey: segment.id)
+        // Clean up timer reference
+        timersQueue.async(flags: .barrier) { [weak self] in
+            self?.retryTimers.removeValue(forKey: segment.id)
+        }
         
-        completion(retrySegment)
+        // Remove from active retries
+        DispatchQueue.main.async { [weak self] in
+            self?.activeRetries.removeValue(forKey: segment.id)
+        }
+        
+        // Execute completion on a background queue to avoid blocking
+        DispatchQueue.global(qos: .userInitiated).async {
+            completion(retrySegment)
+        }
     }
     
     private func updateAverageRetries() {
@@ -133,17 +237,42 @@ class RetryManager: ObservableObject {
     // MARK: - Analytics
     
     func getRetryAnalytics() -> [String: Any] {
-        return [
-            "totalRetries": retryStatistics.totalRetries,
-            "successfulRetries": retryStatistics.successfulRetries,
-            "permanentFailures": retryStatistics.permanentFailures,
-            "successRate": retryStatistics.successRate,
-            "averageRetriesBeforeSuccess": retryStatistics.averageRetriesBeforeSuccess,
-            "activeRetries": activeRetries.count
-        ]
+        return statisticsQueue.sync {
+            return [
+                "totalRetries": retryStatistics.totalRetries,
+                "successfulRetries": retryStatistics.successfulRetries,
+                "permanentFailures": retryStatistics.permanentFailures,
+                "successRate": retryStatistics.successRate,
+                "averageRetriesBeforeSuccess": retryStatistics.averageRetriesBeforeSuccess,
+                "activeRetries": activeRetries.count
+            ]
+        }
     }
     
     func resetStatistics() {
-        retryStatistics = RetryStatistics()
+        statisticsQueue.async { [weak self] in
+            self?.retryStatistics = RetryStatistics()
+            
+            DispatchQueue.main.async {
+                self?.objectWillChange.send()
+            }
+        }
+    }
+    
+    // MARK: - Debug Methods
+    
+    func getActiveTimerCount() -> Int {
+        return timersQueue.sync {
+            return retryTimers.count
+        }
+    }
+    
+    func debugPrintState() {
+        Logger.shared.info("RetryManager State:")
+        Logger.shared.info("- Active retries: \(activeRetries.count)")
+        Logger.shared.info("- Active timers: \(getActiveTimerCount())")
+        Logger.shared.info("- Total retries: \(retryStatistics.totalRetries)")
+        Logger.shared.info("- Successful retries: \(retryStatistics.successfulRetries)")
+        Logger.shared.info("- Permanent failures: \(retryStatistics.permanentFailures)")
     }
 }

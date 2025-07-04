@@ -13,10 +13,14 @@ class AppleTranscriptionService: NSObject, ObservableObject {
     private var speechRecognizer: SFSpeechRecognizer?
     private var currentLocale: Locale = Locale(identifier: "en-US")
     private let audioEngine = AVAudioEngine()
+    
+    // Thread-safe recognition tasks management
     private var recognitionTasks: [UUID: SFSpeechRecognitionTask] = [:]
+    private let tasksQueue = DispatchQueue(label: "apple.speech.tasks", attributes: .concurrent)
     
     // Performance tracking
     private var processingStats = ProcessingStats()
+    private let statsQueue = DispatchQueue(label: "apple.speech.stats")
     
     struct ProcessingStats {
         var totalRequests = 0
@@ -25,10 +29,29 @@ class AppleTranscriptionService: NSObject, ObservableObject {
         var lastProcessingTime = Date()
     }
     
+    // Apple Speech Result structures
+    struct AppleSpeechResult {
+        let transcription: String
+        let confidence: Float
+        let isFinal: Bool
+        let segments: [AppleSpeechSegment]?
+        
+        struct AppleSpeechSegment {
+            let text: String
+            let confidence: Float
+            let timestamp: TimeInterval
+            let duration: TimeInterval
+        }
+    }
+    
     private override init() {
         super.init()
         setupSpeechRecognizer()
         checkAvailability()
+    }
+    
+    deinit {
+        cancelAllTasks()
     }
     
     // MARK: - Public Interface
@@ -43,6 +66,11 @@ class AppleTranscriptionService: NSObject, ObservableObject {
         
         // Load audio file
         guard let audioFileURL = segment.audioFileURL else {
+            throw AppleSpeechError.missingAudioFile
+        }
+        
+        // Validate audio file exists
+        guard FileManager.default.fileExists(atPath: audioFileURL.path) else {
             throw AppleSpeechError.missingAudioFile
         }
         
@@ -125,8 +153,12 @@ class AppleTranscriptionService: NSObject, ObservableObject {
     }
     
     private func updateAvailability() {
-        isAvailable = authorizationStatus == .authorized &&
-                     speechRecognizer?.isAvailable == true
+        let newAvailability = authorizationStatus == .authorized &&
+                             speechRecognizer?.isAvailable == true
+        
+        DispatchQueue.main.async {
+            self.isAvailable = newAvailability
+        }
     }
     
     // MARK: - Core Transcription Logic
@@ -140,6 +172,14 @@ class AppleTranscriptionService: NSObject, ObservableObject {
             return
         }
         
+        // Check current task count to prevent overload
+        tasksQueue.sync {
+            if recognitionTasks.count >= 5 {
+                completion(.failure(AppleSpeechError.tooManyTasks))
+                return
+            }
+        }
+        
         // Create recognition request
         let request = SFSpeechURLRecognitionRequest(url: audioFileURL)
         request.shouldReportPartialResults = false
@@ -150,18 +190,30 @@ class AppleTranscriptionService: NSObject, ObservableObject {
             request.addsPunctuation = true
         }
         
-        // Start recognition task
+        // Generate unique task ID
         let taskId = UUID()
-        let recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            self?.handleRecognitionResult(
-                taskId: taskId,
-                result: result,
-                error: error,
-                completion: completion
-            )
-        }
         
-        recognitionTasks[taskId] = recognitionTask
+        // Start recognition task on main queue (required by Speech framework)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else {
+                completion(.failure(AppleSpeechError.recognizerUnavailable))
+                return
+            }
+            
+            let recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+                self?.handleRecognitionResult(
+                    taskId: taskId,
+                    result: result,
+                    error: error,
+                    completion: completion
+                )
+            }
+            
+            // Store task safely
+            self.tasksQueue.async(flags: .barrier) {
+                self.recognitionTasks[taskId] = recognitionTask
+            }
+        }
     }
     
     private func handleRecognitionResult(
@@ -170,8 +222,11 @@ class AppleTranscriptionService: NSObject, ObservableObject {
         error: Error?,
         completion: @escaping (Result<AppleSpeechResult, Error>) -> Void
     ) {
+        // Always clean up the task when done
         defer {
-            recognitionTasks.removeValue(forKey: taskId)
+            tasksQueue.async(flags: .barrier) { [weak self] in
+                self?.recognitionTasks.removeValue(forKey: taskId)
+            }
         }
         
         if let error = error {
@@ -186,6 +241,11 @@ class AppleTranscriptionService: NSObject, ObservableObject {
             return
         }
         
+        // Only process final results
+        guard result.isFinal else {
+            return
+        }
+        
         // Process the result
         let speechResult = processRecognitionResult(result)
         completion(.success(speechResult))
@@ -194,11 +254,16 @@ class AppleTranscriptionService: NSObject, ObservableObject {
     private func processRecognitionResult(_ result: SFSpeechRecognitionResult) -> AppleSpeechResult {
         let bestTranscription = result.bestTranscription
         
-        // Break down complex confidence calculation
+        // Calculate average confidence
         let confidenceValues = bestTranscription.segments.map { $0.confidence }
-        let confidenceSum = confidenceValues.reduce(0, +)
-        let averageConfidence = Double(confidenceSum) / Double(bestTranscription.segments.count)
-        let confidence = Float(averageConfidence)
+        let averageConfidence: Float
+        
+        if confidenceValues.isEmpty {
+            averageConfidence = 0.5 // Default confidence if no segments
+        } else {
+            let confidenceSum = confidenceValues.reduce(0, +)
+            averageConfidence = Float(confidenceSum) / Float(confidenceValues.count)
+        }
         
         // Extract segments with timing information
         let segments = bestTranscription.segments.map { segment in
@@ -212,7 +277,7 @@ class AppleTranscriptionService: NSObject, ObservableObject {
         
         return AppleSpeechResult(
             transcription: bestTranscription.formattedString,
-            confidence: confidence,
+            confidence: averageConfidence,
             isFinal: result.isFinal,
             segments: segments
         )
@@ -224,8 +289,8 @@ class AppleTranscriptionService: NSObject, ObservableObject {
         // Use on-device recognition when possible for privacy
         // and when network is not available
         if #available(iOS 13.0, *) {
-            return !NetworkMonitorService.shared.isConnected ||
-                   SettingsService.shared.settings.preferLocalProcessing
+            // Default to on-device for privacy unless explicitly disabled
+            return true
         }
         return false
     }
@@ -239,26 +304,59 @@ class AppleTranscriptionService: NSObject, ObservableObject {
             throw AppleSpeechError.recognizerUnavailable
         }
         
-        // Check device capabilities
+        // Check device capabilities for on-device recognition
         if determineOnDeviceRequirement() && !recognizer.supportsOnDeviceRecognition {
-            throw AppleSpeechError.onDeviceNotSupported
+            Logger.shared.warning("On-device recognition not supported, falling back to server-based")
+            // Don't throw error, just log warning and continue with server-based
         }
     }
     
     // MARK: - Performance Monitoring
     
     private func updateProcessingStats(processingTime: TimeInterval, success: Bool) {
-        processingStats.totalRequests += 1
-        
-        if success {
-            processingStats.successfulRequests += 1
+        statsQueue.async { [weak self] in
+            guard let self = self else { return }
             
-            // Update rolling average
-            let totalTime = processingStats.averageProcessingTime * Double(processingStats.successfulRequests - 1)
-            processingStats.averageProcessingTime = (totalTime + processingTime) / Double(processingStats.successfulRequests)
+            self.processingStats.totalRequests += 1
+            
+            if success {
+                self.processingStats.successfulRequests += 1
+                
+                // Update rolling average
+                let totalTime = self.processingStats.averageProcessingTime * Double(self.processingStats.successfulRequests - 1)
+                self.processingStats.averageProcessingTime = (totalTime + processingTime) / Double(self.processingStats.successfulRequests)
+            }
+            
+            self.processingStats.lastProcessingTime = Date()
         }
-        
-        processingStats.lastProcessingTime = Date()
+    }
+    
+    // MARK: - Task Management
+    
+    private func getActiveTaskCount() -> Int {
+        return tasksQueue.sync {
+            return recognitionTasks.count
+        }
+    }
+    
+    func cancelAllTasks() {
+        tasksQueue.async(flags: .barrier) { [weak self] in
+            guard let self = self else { return }
+            
+            for (_, task) in self.recognitionTasks {
+                task.cancel()
+            }
+            self.recognitionTasks.removeAll()
+        }
+    }
+    
+    func cancelTask(with id: UUID) {
+        tasksQueue.async(flags: .barrier) { [weak self] in
+            if let task = self?.recognitionTasks[id] {
+                task.cancel()
+                self?.recognitionTasks.removeValue(forKey: id)
+            }
+        }
     }
     
     // MARK: - Utility Methods
@@ -283,22 +381,18 @@ class AppleTranscriptionService: NSObject, ObservableObject {
             return (false, "Speech recognizer temporarily unavailable")
         }
         
-        if recognitionTasks.count >= 5 { // Arbitrary limit
-            return (false, "Too many concurrent recognition tasks")
+        let taskCount = getActiveTaskCount()
+        if taskCount >= 5 {
+            return (false, "Too many concurrent recognition tasks (\(taskCount))")
         }
         
         return (true, "Service operational")
     }
     
     func getProcessingStats() -> ProcessingStats {
-        return processingStats
-    }
-    
-    func cancelAllTasks() {
-        for (_, task) in recognitionTasks {
-            task.cancel()
+        return statsQueue.sync {
+            return processingStats
         }
-        recognitionTasks.removeAll()
     }
     
     func estimateProcessingTime(for audioFileURL: URL) -> TimeInterval {
@@ -350,6 +444,7 @@ enum AppleSpeechError: Error, LocalizedError {
     case noResult
     case onDeviceNotSupported
     case audioFileCorrupted
+    case tooManyTasks
     
     var errorDescription: String? {
         switch self {
@@ -369,6 +464,8 @@ enum AppleSpeechError: Error, LocalizedError {
             return "On-device recognition is not supported on this device"
         case .audioFileCorrupted:
             return "Audio file is corrupted or unreadable"
+        case .tooManyTasks:
+            return "Too many concurrent transcription tasks"
         }
     }
     
@@ -390,6 +487,8 @@ enum AppleSpeechError: Error, LocalizedError {
             return "Use cloud-based recognition or upgrade device"
         case .audioFileCorrupted:
             return "Re-record the audio segment"
+        case .tooManyTasks:
+            return "Wait for current transcriptions to complete"
         }
     }
 }

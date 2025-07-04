@@ -9,6 +9,7 @@ struct RecordingDetailView: View {
     @State private var timer: Timer?
     @State private var showingTranscription = false
     @State private var showingAPIKeySetup = false
+    @State private var playbackError: String?
     
     // Transcription dependencies
     @ObservedObject private var transcriptionManager = TranscriptionManager.shared
@@ -32,6 +33,11 @@ struct RecordingDetailView: View {
                     playbackControlsSection
                 }
                 
+                // Error Display
+                if let error = playbackError {
+                    errorSection(error)
+                }
+                
                 Spacer(minLength: 50)
             }
             .padding()
@@ -48,6 +54,10 @@ struct RecordingDetailView: View {
         }
         .onAppear {
             checkAutoTranscription()
+        }
+        .refreshable {
+            // Force refresh transcription state
+            await refreshTranscriptionState()
         }
     }
     
@@ -184,21 +194,23 @@ struct RecordingDetailView: View {
     
     private var transcriptionPreviewSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let transcriptionText = transcriptionText, !transcriptionText.isEmpty {
-                // Preview text (first 200 characters)
-                let previewText = String(transcriptionText.prefix(200))
-                let hasMore = transcriptionText.count > 200
+            if !transcriptionText.isEmpty {
+                // Preview text (first 300 characters for better preview)
+                let previewText = String(transcriptionText.prefix(300))
+                let hasMore = transcriptionText.count > 300
                 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(previewText + (hasMore ? "..." : ""))
                         .font(.body)
-                        .lineLimit(4)
+                        .lineLimit(6)
                         .padding()
                         .background(Color(.systemBackground))
                         .cornerRadius(8)
+                        .textSelection(.enabled) // Allow text selection
                     
-                    if let job = currentJob {
-                        HStack {
+                    // Show transcription stats
+                    HStack {
+                        if let job = currentJob {
                             Text("\(job.completedSegments) of \(job.totalSegments) segments")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -211,8 +223,20 @@ struct RecordingDetailView: View {
                                     .foregroundColor(.orange)
                             }
                         }
+                        
+                        Text("Words: \(wordCount)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
+            } else {
+                // Fallback if no text available
+                Text("Transcription completed but no text available")
+                    .font(.body)
+                    .foregroundColor(.secondary)
+                    .padding()
+                    .background(Color(.systemBackground))
+                    .cornerRadius(8)
             }
             
             // Action buttons
@@ -228,6 +252,7 @@ struct RecordingDetailView: View {
                     Image(systemName: "square.and.arrow.up")
                 }
                 .buttonStyle(.bordered)
+                .disabled(transcriptionText.isEmpty)
             }
         }
     }
@@ -368,21 +393,46 @@ struct RecordingDetailView: View {
     
     private var playbackControlsSection: some View {
         VStack(spacing: 16) {
+            // Audio progress if playing
+            if isPlaying {
+                VStack(spacing: 8) {
+                    HStack {
+                        Text(formatTime(currentTime))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        
+                        Spacer()
+                        
+                        Text(formatTime(session.duration))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    ProgressView(value: currentTime, total: session.duration)
+                        .tint(.blue)
+                }
+            }
+            
             HStack(spacing: 30) {
+                // Main play/pause button
                 Button(action: togglePlayback) {
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                         .font(.title2)
                         .foregroundColor(.white)
                 }
                 .frame(width: 60, height: 60)
-                .background(Circle().fill(Color.blue))
+                .background(Circle().fill(session.fileURL != nil ? Color.blue : Color.gray))
+                .disabled(session.fileURL == nil)
                 
+                // Share recording button
                 Button(action: shareRecording) {
                     Image(systemName: "square.and.arrow.up")
                         .font(.title2)
                 }
-                .buttonStyle(ControlButtonStyle(isEnabled: true))
+                .buttonStyle(ControlButtonStyle(isEnabled: session.fileURL != nil))
+                .disabled(session.fileURL == nil)
                 
+                // View transcription button (only if has transcription)
                 if hasTranscription {
                     Button(action: { showingTranscription = true }) {
                         Image(systemName: "doc.text")
@@ -394,11 +444,33 @@ struct RecordingDetailView: View {
         }
     }
     
+    private func errorSection(_ error: String) -> some View {
+        HStack {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundColor(.red)
+            
+            Text(error)
+                .font(.caption)
+                .foregroundColor(.red)
+            
+            Spacer()
+            
+            Button("Dismiss") {
+                playbackError = nil
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding()
+        .background(Color.red.opacity(0.1))
+        .cornerRadius(8)
+    }
+    
     // MARK: - Computed Properties
     
     private var currentJob: TranscriptionJob? {
-        transcriptionManager.activeJobs.first { $0.sessionId == session.id } ??
-        transcriptionManager.completedJobs.first { $0.sessionId == session.id }
+        // First check completed jobs, then active jobs
+        transcriptionManager.completedJobs.first { $0.sessionId == session.id } ??
+        transcriptionManager.activeJobs.first { $0.sessionId == session.id }
     }
     
     private var isTranscribing: Bool {
@@ -406,19 +478,41 @@ struct RecordingDetailView: View {
     }
     
     private var hasTranscription: Bool {
-        transcriptionText != nil && !transcriptionText!.isEmpty
+        !transcriptionText.isEmpty
     }
     
     private var hasFailedTranscription: Bool {
-        currentJob?.hasFailures == true && currentJob?.completedSegments == 0
+        if let job = currentJob {
+            return job.hasFailures && job.completedSegments == 0
+        }
+        return false
     }
     
     private var hasPartialTranscription: Bool {
-        currentJob?.hasFailures == true && currentJob?.completedSegments ?? 0 > 0
+        if let job = currentJob {
+            return job.hasFailures && job.completedSegments > 0 && !transcriptionText.isEmpty
+        }
+        return false
     }
     
-    private var transcriptionText: String? {
-        transcriptionManager.getTranscriptionText(for: session.id)
+    private var transcriptionText: String {
+        // Try multiple ways to get transcription text
+        if let job = currentJob, !job.fullTranscriptionText.isEmpty {
+            return job.fullTranscriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        if let managerText = transcriptionManager.getTranscriptionText(for: session.id),
+           !managerText.isEmpty {
+            return managerText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        return ""
+    }
+    
+    private var wordCount: Int {
+        return transcriptionText.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .count
     }
     
     private var preferredTranscriptionService: TranscriptionService? {
@@ -490,10 +584,24 @@ struct RecordingDetailView: View {
         }
     }
     
+    private func refreshTranscriptionState() async {
+        // Force refresh the transcription manager state
+        DispatchQueue.main.async {
+            self.transcriptionManager.objectWillChange.send()
+        }
+    }
+    
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+    
     // MARK: - Actions
     
     private func startTranscription() {
-        let _ = transcriptionManager.startTranscriptionJob(for: session)
+        let job = transcriptionManager.startTranscriptionJob(for: session)
+        Logger.shared.info("Started transcription job: \(job.id)")
     }
     
     private func retryFailedSegments() {
@@ -505,10 +613,10 @@ struct RecordingDetailView: View {
     }
     
     private func shareTranscription() {
-        guard let text = transcriptionText else { return }
+        guard !transcriptionText.isEmpty else { return }
         
         let activityVC = UIActivityViewController(
-            activityItems: [text],
+            activityItems: [transcriptionText],
             applicationActivities: nil
         )
         
@@ -519,7 +627,7 @@ struct RecordingDetailView: View {
         }
     }
     
-    // MARK: - Playback Methods (Unchanged)
+    // MARK: - Playback Methods (Fixed)
     
     private func togglePlayback() {
         if isPlaying {
@@ -530,22 +638,51 @@ struct RecordingDetailView: View {
     }
     
     private func startPlayback() {
-        guard let fileURL = session.fileURL else { return }
+        guard let fileURL = session.fileURL else {
+            playbackError = "Audio file not found"
+            return
+        }
+        
+        // Check if file exists
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            playbackError = "Audio file no longer exists"
+            return
+        }
         
         do {
-            audioPlayer = try AVAudioPlayer(contentsOf: fileURL)
-            audioPlayer?.play()
-            isPlaying = true
+            // Configure audio session
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try AVAudioSession.sharedInstance().setActive(true)
             
-            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-                if let player = audioPlayer {
-                    currentTime = player.currentTime
-                    if !player.isPlaying {
-                        stopPlayback()
+            // Create and configure audio player
+            audioPlayer = try AVAudioPlayer(contentsOf: fileURL)
+            audioPlayer?.prepareToPlay()
+            audioPlayer?.volume = 1.0
+            
+            // Start playback
+            let success = audioPlayer?.play() ?? false
+            
+            if success {
+                isPlaying = true
+                playbackError = nil
+                
+                // Start timer for progress tracking
+                timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+                    if let player = self.audioPlayer {
+                        self.currentTime = player.currentTime
+                        
+                        // Check if playback finished
+                        if !player.isPlaying && player.currentTime >= player.duration {
+                            self.stopPlayback()
+                        }
                     }
                 }
+            } else {
+                playbackError = "Failed to start audio playback"
             }
+            
         } catch {
+            playbackError = "Playback error: \(error.localizedDescription)"
             Logger.shared.error("Failed to start playback: \(error)")
         }
     }
@@ -554,6 +691,7 @@ struct RecordingDetailView: View {
         audioPlayer?.pause()
         isPlaying = false
         timer?.invalidate()
+        timer = nil
     }
     
     private func stopPlayback() {
@@ -561,11 +699,23 @@ struct RecordingDetailView: View {
         audioPlayer = nil
         isPlaying = false
         timer?.invalidate()
+        timer = nil
         currentTime = 0
+        
+        // Deactivate audio session
+        try? AVAudioSession.sharedInstance().setActive(false)
     }
     
     private func shareRecording() {
-        guard let fileURL = session.fileURL else { return }
+        guard let fileURL = session.fileURL else {
+            playbackError = "Audio file not found"
+            return
+        }
+        
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            playbackError = "Audio file no longer exists"
+            return
+        }
         
         let activityVC = UIActivityViewController(
             activityItems: [fileURL],

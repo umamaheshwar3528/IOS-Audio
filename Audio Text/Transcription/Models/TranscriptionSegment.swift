@@ -15,6 +15,7 @@ struct TranscriptionSegment: Identifiable, Codable {
     var transcribedAt: Date?
     var retryCount: Int
     var errorMessage: String?
+    var isPermanentFailure: Bool
     
     init(sessionId: UUID, segmentIndex: Int, startTime: TimeInterval, endTime: TimeInterval, audioFileURL: URL? = nil) {
         self.id = UUID()
@@ -27,6 +28,7 @@ struct TranscriptionSegment: Identifiable, Codable {
         self.service = .none
         self.createdAt = Date()
         self.retryCount = 0
+        self.isPermanentFailure = false
     }
     
     var duration: TimeInterval {
@@ -45,11 +47,13 @@ struct TranscriptionSegment: Identifiable, Codable {
     }
     
     var isTranscribed: Bool {
-        return status == .completed && transcriptionText != nil
+        return status == .completed && transcriptionText != nil && !transcriptionText!.isEmpty
     }
     
     var needsRetry: Bool {
-        return status == .failed && retryCount < TranscriptionConstants.maxRetryAttempts
+            return status == .failed &&
+                   !isPermanentFailure &&
+                   retryCount < TranscriptionConstants.maxRetryAttempts
     }
     
     mutating func markAsProcessing(with service: TranscriptionService) {
