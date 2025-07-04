@@ -8,13 +8,16 @@ struct RecordingSettings: Codable {
     var maxRecordingDuration: TimeInterval
     var autoSaveEnabled: Bool
     
+    var preferLocalProcessing: Bool
+    
     static let `default` = RecordingSettings(
         audioQuality: .medium,
         backgroundRecordingEnabled: true,
         autoStopOnLowBattery: true,
         showAudioLevels: true,
         maxRecordingDuration: AudioConstants.maxRecordingDuration,
-        autoSaveEnabled: true
+        autoSaveEnabled: true,
+        preferLocalProcessing: true
     )
     
     // UserDefaults keys
@@ -25,6 +28,7 @@ struct RecordingSettings: Codable {
         case showAudioLevels = "recording_show_audio_levels"
         case maxDuration = "recording_max_duration"
         case autoSave = "recording_auto_save"
+        case preferLocalProcessing    = "recording_prefer_local_processing"
     }
     
     // Save to UserDefaults
@@ -36,6 +40,7 @@ struct RecordingSettings: Codable {
         defaults.set(showAudioLevels, forKey: Keys.showAudioLevels.rawValue)
         defaults.set(maxRecordingDuration, forKey: Keys.maxDuration.rawValue)
         defaults.set(autoSaveEnabled, forKey: Keys.autoSave.rawValue)
+        defaults.set(preferLocalProcessing, forKey: Keys.preferLocalProcessing.rawValue)
     }
     
     // Load from UserDefaults
@@ -48,7 +53,8 @@ struct RecordingSettings: Codable {
             autoStopOnLowBattery: defaults.object(forKey: Keys.autoStopLowBattery.rawValue) as? Bool ?? true,
             showAudioLevels: defaults.object(forKey: Keys.showAudioLevels.rawValue) as? Bool ?? true,
             maxRecordingDuration: defaults.object(forKey: Keys.maxDuration.rawValue) as? TimeInterval ?? AudioConstants.maxRecordingDuration,
-            autoSaveEnabled: defaults.object(forKey: Keys.autoSave.rawValue) as? Bool ?? true
+            autoSaveEnabled: defaults.object(forKey: Keys.autoSave.rawValue) as? Bool ?? true,
+            preferLocalProcessing:       defaults.object(forKey: Keys.preferLocalProcessing.rawValue) as? Bool ?? true
         )
     }
 }

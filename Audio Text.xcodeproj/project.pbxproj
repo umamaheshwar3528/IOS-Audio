@@ -10,22 +10,9 @@
 		CE4FDFCC2E16A1DB0041BB03 /* Audio Text.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Audio Text.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		CE3819802E182E480098B604 /* Exceptions for "Audio Text" folder in "Audio Text" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				"Audio-Text-Info.plist",
-			);
-			target = CE4FDFCB2E16A1DB0041BB03 /* Audio Text */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		CE4FDFCE2E16A1DB0041BB03 /* Audio Text */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				CE3819802E182E480098B604 /* Exceptions for "Audio Text" folder in "Audio Text" target */,
-			);
 			path = "Audio Text";
 			sourceTree = "<group>";
 		};

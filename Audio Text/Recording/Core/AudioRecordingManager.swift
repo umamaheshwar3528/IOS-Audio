@@ -297,25 +297,24 @@ class AudioRecordingManager: ObservableObject {
     
     private func updateRecordingDuration() {
         guard let startTime = recordingStartTime else { return }
-        
         let currentDuration = Date().timeIntervalSince(startTime) - pausedDuration
         
-        // Update on main thread
-        DispatchQueue.main.async {
-            self.recordingDuration = max(0, currentDuration)
-            
-            // Check for maximum duration
-            if self.recordingDuration >= AudioConstants.maxRecordingDuration {
-                self.stopRecording()
-            }
+        // Direct update since we're already on main thread
+        self.recordingDuration = max(0, currentDuration)
+        
+        if self.recordingDuration >= AudioConstants.maxRecordingDuration {
+            self.stopRecording()
         }
     }
     
     private func stopTimers() {
-        audioLevelTimer?.invalidate()
-        durationTimer?.invalidate()
-        audioLevelTimer = nil
-        durationTimer = nil
+        // Invalidate timers on main thread
+        DispatchQueue.main.async { [weak self] in
+            self?.audioLevelTimer?.invalidate()
+            self?.durationTimer?.invalidate()
+            self?.audioLevelTimer = nil
+            self?.durationTimer = nil
+        }
     }
     
     // MARK: - Error Handling
