@@ -6,9 +6,47 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		CEB9A7D02E1B032100CED722 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CE4FDFC42E16A1DB0041BB03 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CE4FDFCB2E16A1DB0041BB03;
+			remoteInfo = "Audio Text";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		CE4FDFCC2E16A1DB0041BB03 /* Audio Text.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Audio Text.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		CEB9A7CC2E1B032100CED722 /* Audio TextTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Audio TextTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		CEB9A7D72E1B063B00CED722 /* Exceptions for "Audio TextTests" folder in "Audio Text" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AudioConfigurationTests.swift,
+				AudioRecordingManagerTests.swift,
+				RecordingSessionTests.swift,
+				RetryManagerTests.swift,
+				TranscriptionJobTests.swift,
+				TranscriptionManagerTests.swift,
+			);
+			target = CE4FDFCB2E16A1DB0041BB03 /* Audio Text */;
+		};
+		CEB9A7D82E1B063B00CED722 /* Exceptions for "Audio TextTests" folder in "Audio TextTests" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AudioConfigurationTests.swift,
+				AudioRecordingManagerTests.swift,
+				RecordingSessionTests.swift,
+				RetryManagerTests.swift,
+				TranscriptionJobTests.swift,
+				TranscriptionManagerTests.swift,
+			);
+			target = CEB9A7CB2E1B032100CED722 /* Audio TextTests */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		CE4FDFCE2E16A1DB0041BB03 /* Audio Text */ = {
@@ -16,10 +54,26 @@
 			path = "Audio Text";
 			sourceTree = "<group>";
 		};
+		CEB9A7CD2E1B032100CED722 /* Audio TextTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				CEB9A7D72E1B063B00CED722 /* Exceptions for "Audio TextTests" folder in "Audio Text" target */,
+				CEB9A7D82E1B063B00CED722 /* Exceptions for "Audio TextTests" folder in "Audio TextTests" target */,
+			);
+			path = "Audio TextTests";
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		CE4FDFC92E16A1DB0041BB03 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CEB9A7C92E1B032100CED722 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -33,6 +87,7 @@
 			isa = PBXGroup;
 			children = (
 				CE4FDFCE2E16A1DB0041BB03 /* Audio Text */,
+				CEB9A7CD2E1B032100CED722 /* Audio TextTests */,
 				CE4FDFCD2E16A1DB0041BB03 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +96,7 @@
 			isa = PBXGroup;
 			children = (
 				CE4FDFCC2E16A1DB0041BB03 /* Audio Text.app */,
+				CEB9A7CC2E1B032100CED722 /* Audio TextTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -70,6 +126,29 @@
 			productReference = CE4FDFCC2E16A1DB0041BB03 /* Audio Text.app */;
 			productType = "com.apple.product-type.application";
 		};
+		CEB9A7CB2E1B032100CED722 /* Audio TextTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CEB9A7D22E1B032100CED722 /* Build configuration list for PBXNativeTarget "Audio TextTests" */;
+			buildPhases = (
+				CEB9A7C82E1B032100CED722 /* Sources */,
+				CEB9A7C92E1B032100CED722 /* Frameworks */,
+				CEB9A7CA2E1B032100CED722 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CEB9A7D12E1B032100CED722 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				CEB9A7CD2E1B032100CED722 /* Audio TextTests */,
+			);
+			name = "Audio TextTests";
+			packageProductDependencies = (
+			);
+			productName = "Audio TextTests";
+			productReference = CEB9A7CC2E1B032100CED722 /* Audio TextTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -83,6 +162,10 @@
 					CE4FDFCB2E16A1DB0041BB03 = {
 						CreatedOnToolsVersion = 16.4;
 						LastSwiftMigration = 1640;
+					};
+					CEB9A7CB2E1B032100CED722 = {
+						CreatedOnToolsVersion = 16.4;
+						TestTargetID = CE4FDFCB2E16A1DB0041BB03;
 					};
 				};
 			};
@@ -101,12 +184,20 @@
 			projectRoot = "";
 			targets = (
 				CE4FDFCB2E16A1DB0041BB03 /* Audio Text */,
+				CEB9A7CB2E1B032100CED722 /* Audio TextTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		CE4FDFCA2E16A1DB0041BB03 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CEB9A7CA2E1B032100CED722 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -123,7 +214,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CEB9A7C82E1B032100CED722 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		CEB9A7D12E1B032100CED722 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CE4FDFCB2E16A1DB0041BB03 /* Audio Text */;
+			targetProxy = CEB9A7D02E1B032100CED722 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		CE4FDFD72E16A1DC0041BB03 /* Debug */ = {
@@ -253,7 +359,9 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 47Z9MC7Z93;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_TESTING_SEARCH_PATHS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Audio-Text-Info.plist";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -283,7 +391,9 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 47Z9MC7Z93;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_TESTING_SEARCH_PATHS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Audio-Text-Info.plist";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -304,6 +414,40 @@
 			};
 			name = Release;
 		};
+		CEB9A7D32E1B032100CED722 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "codemaster.Audio-TextTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Audio Text.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Audio Text";
+			};
+			name = Debug;
+		};
+		CEB9A7D42E1B032100CED722 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "codemaster.Audio-TextTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Audio Text.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Audio Text";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -321,6 +465,15 @@
 			buildConfigurations = (
 				CE4FDFDA2E16A1DC0041BB03 /* Debug */,
 				CE4FDFDB2E16A1DC0041BB03 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CEB9A7D22E1B032100CED722 /* Build configuration list for PBXNativeTarget "Audio TextTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CEB9A7D32E1B032100CED722 /* Debug */,
+				CEB9A7D42E1B032100CED722 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

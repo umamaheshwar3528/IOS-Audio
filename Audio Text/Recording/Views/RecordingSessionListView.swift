@@ -4,19 +4,24 @@ struct RecordingSessionListView: View {
     @ObservedObject private var fileManagerService = FileManagerService.shared
     @ObservedObject private var transcriptionManager = TranscriptionManager.shared
     @Environment(\.dismiss) private var dismiss
+    
     @State private var searchText = ""
-    @State private var showingDeleteConfirmation = false
+    @State private var selectedFilter: FilterOption = .all
+    @State private var showingDeleteAlert = false
     @State private var sessionToDelete: RecordingSession?
     @State private var selectedSession: RecordingSession?
-    @State private var filterOption: FilterOption = .all
+    @State private var showingError = false
+    @State private var errorMessage = ""
     
-    enum FilterOption: String, CaseIterable {
+    enum FilterOption: String, CaseIterable, Identifiable {
         case all = "All"
         case transcribed = "Transcribed"
         case notTranscribed = "Not Transcribed"
         case processing = "Processing"
         
-        var systemImage: String {
+        var id: String { rawValue }
+        
+        var icon: String {
             switch self {
             case .all: return "list.bullet"
             case .transcribed: return "checkmark.circle"
@@ -24,72 +29,43 @@ struct RecordingSessionListView: View {
             case .processing: return "clock"
             }
         }
+        
+        var color: Color {
+            switch self {
+            case .all: return .blue
+            case .transcribed: return .green
+            case .notTranscribed: return .gray
+            case .processing: return .orange
+            }
+        }
     }
     
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                // Filter Pills
-                filterSection
+                // Filter bar
+                filterBar
                 
-                // List
-                List {
-                    if filteredRecordings.isEmpty {
-                        emptyStateView
-                    } else {
-                        ForEach(groupedRecordings.keys.sorted(by: >), id: \.self) { date in
-                            Section(header: sectionHeader(for: date)) {
-                                ForEach(groupedRecordings[date] ?? []) { session in
-                                    RecordingSessionRow(session: session)
-                                        .onTapGesture {
-                                            selectedSession = session
-                                        }
-                                        .contextMenu {
-                                            contextMenuActions(for: session)
-                                        }
-                                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                            swipeActions(for: session)
-                                        }
-                                }
-                            }
-                        }
-                    }
-                }
-                .listStyle(PlainListStyle())
+                // Content
+                contentView
             }
             .navigationTitle("Recordings")
-            .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $searchText, prompt: "Search recordings or transcriptions")
+            .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Done") {
-                        dismiss()
-                    }
+                    Button("Done", action: { dismiss() })
                 }
                 
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    HStack {
-                        Text("\(filteredRecordings.count) sessions")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
-                        Menu {
-                            ForEach(FilterOption.allCases, id: \.self) { option in
-                                Button(action: { filterOption = option }) {
-                                    Label(option.rawValue, systemImage: option.systemImage)
-                                }
-                            }
-                        } label: {
-                            Image(systemName: "line.3.horizontal.decrease.circle")
-                        }
-                    }
+                    summaryText
                 }
             }
+            .searchable(text: $searchText, prompt: "Search recordings or transcriptions")
+            .background(Color(.systemGroupedBackground))
             .refreshable {
-                fileManagerService.objectWillChange.send()
-                transcriptionManager.objectWillChange.send()
+                await refreshData()
             }
-            .alert("Delete Recording", isPresented: $showingDeleteConfirmation) {
+            .alert("Delete Recording", isPresented: $showingDeleteAlert) {
                 Button("Cancel", role: .cancel) {}
                 Button("Delete", role: .destructive) {
                     if let session = sessionToDelete {
@@ -98,6 +74,11 @@ struct RecordingSessionListView: View {
                 }
             } message: {
                 Text("This action cannot be undone.")
+            }
+            .alert("Error", isPresented: $showingError) {
+                Button("OK") {}
+            } message: {
+                Text(errorMessage)
             }
             .sheet(item: $selectedSession) { session in
                 NavigationView {
@@ -114,183 +95,121 @@ struct RecordingSessionListView: View {
         }
     }
     
-    // MARK: - View Components
+    // MARK: - Filter Bar
     
-    private var filterSection: some View {
+    private var filterBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
-                ForEach(FilterOption.allCases, id: \.self) { option in
-                    FilterPill(
-                        option: option,
-                        isSelected: filterOption == option,
-                        count: countForFilter(option)
+                ForEach(FilterOption.allCases) { filter in
+                    FilterChip(
+                        filter: filter,
+                        isSelected: selectedFilter == filter,
+                        count: countForFilter(filter)
                     ) {
-                        filterOption = option
+                        withAnimation(.smooth(duration: 0.3)) {
+                            selectedFilter = filter
+                        }
                     }
                 }
             }
-            .padding(.horizontal)
+            .padding(.horizontal, 20)
         }
-        .padding(.vertical, 8)
-        .background(Color(.systemGray6))
+        .padding(.vertical, 12)
+        .background(Color(.systemBackground))
+        .overlay(
+            Rectangle()
+                .frame(height: 0.5)
+                .foregroundColor(Color(.separator)),
+            alignment: .bottom
+        )
     }
     
-    private func sectionHeader(for date: Date) -> some View {
-        HStack {
-            Text(date, style: .date)
-                .font(.headline)
-            
-            Spacer()
-            
-            let sessionsForDate = groupedRecordings[date] ?? []
-            let transcribedCount = sessionsForDate.filter { hasTranscription(for: $0) }.count
-            
-            if transcribedCount > 0 {
-                Text("\(transcribedCount)/\(sessionsForDate.count) transcribed")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+    // MARK: - Content View
+    
+    private var contentView: some View {
+        Group {
+            if filteredRecordings.isEmpty {
+                EmptyStateView(filter: selectedFilter, searchText: searchText)
+            } else {
+                recordingsList
             }
         }
     }
     
-    private var emptyStateView: some View {
-        VStack(spacing: 16) {
-            Image(systemName: emptyStateIcon)
-                .font(.system(size: 48))
-                .foregroundColor(.secondary)
-            
-            Text(emptyStateTitle)
-                .font(.title2)
-                .fontWeight(.medium)
-            
-            Text(emptyStateMessage)
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-    
-    private var emptyStateIcon: String {
-        switch filterOption {
-        case .all:
-            return "mic.slash"
-        case .transcribed:
-            return "doc.text"
-        case .notTranscribed:
-            return "text.badge.xmark"
-        case .processing:
-            return "clock"
-        }
-    }
-    
-    private var emptyStateTitle: String {
-        switch filterOption {
-        case .all:
-            return "No Recordings"
-        case .transcribed:
-            return "No Transcribed Recordings"
-        case .notTranscribed:
-            return "All Recordings Transcribed"
-        case .processing:
-            return "No Processing Recordings"
-        }
-    }
-    
-    private var emptyStateMessage: String {
-        switch filterOption {
-        case .all:
-            return "Your recordings will appear here after you make them."
-        case .transcribed:
-            return "Recordings with completed transcriptions will appear here."
-        case .notTranscribed:
-            return "Great! All your recordings have been transcribed."
-        case .processing:
-            return "Recordings currently being transcribed will appear here."
-        }
-    }
-    
-    // MARK: - Context Menu and Swipe Actions
-    
-    @ViewBuilder
-    private func contextMenuActions(for session: RecordingSession) -> some View {
-        if hasTranscription(for: session) {
-            Button("View Transcription") {
-                selectedSession = session
-            }
-            
-            Button("Share Transcription") {
-                shareTranscription(for: session)
-            }
-        } else if !isTranscribing(session: session) {
-            Button("Start Transcription") {
-                startTranscription(for: session)
+    private var recordingsList: some View {
+        List {
+            ForEach(groupedRecordings.keys.sorted(by: >), id: \.self) { date in
+                Section {
+                    ForEach(groupedRecordings[date] ?? []) { session in
+                        SessionRow(session: session)
+                            .listRowBackground(Color(.systemBackground))
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 8, leading: 20, bottom: 8, trailing: 20))
+                            .onTapGesture {
+                                selectedSession = session
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                swipeActions(for: session)
+                            }
+                            .contextMenu {
+                                contextMenuActions(for: session)
+                            }
+                    }
+                } header: {
+                    SectionHeader(
+                        date: date,
+                        sessions: groupedRecordings[date] ?? [],
+                        transcriptionManager: transcriptionManager
+                    )
+                }
             }
         }
-        
-        Divider()
-        
-        Button("Share Recording") {
-            shareRecording(session)
-        }
-        
-        Button("Delete", role: .destructive) {
-            sessionToDelete = session
-            showingDeleteConfirmation = true
-        }
+        .listStyle(.plain)
+        .animation(.smooth(duration: 0.3), value: filteredRecordings.count)
     }
     
-    @ViewBuilder
-    private func swipeActions(for session: RecordingSession) -> some View {
-        if hasTranscription(for: session) {
-            Button("View") {
-                selectedSession = session
-            }
-            .tint(.blue)
-        } else if !isTranscribing(session: session) {
-            Button("Transcribe") {
-                startTranscription(for: session)
-            }
-            .tint(.green)
-        }
-        
-        Button("Delete") {
-            sessionToDelete = session
-            showingDeleteConfirmation = true
-        }
-        .tint(.red)
+    private var summaryText: some View {
+        Text("\(filteredRecordings.count)")
+            .font(.caption)
+            .fontWeight(.medium)
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(Color(.systemGray5))
+            )
     }
     
     // MARK: - Computed Properties
     
     private var filteredRecordings: [RecordingSession] {
         let recordings = fileManagerService.recordings.filter { session in
-            // Apply text search
+            // Text search
             if !searchText.isEmpty {
-                let matchesTitle = session.title.localizedCaseInsensitiveContains(searchText)
-                let matchesTranscription = transcriptionManager.getTranscriptionText(for: session.id)?
+                let titleMatch = session.title.localizedCaseInsensitiveContains(searchText)
+                let transcriptionMatch = transcriptionManager.getTranscriptionText(for: session.id)?
                     .localizedCaseInsensitiveContains(searchText) ?? false
                 
-                if !matchesTitle && !matchesTranscription {
+                if !titleMatch && !transcriptionMatch {
                     return false
                 }
             }
             
-            // Apply filter
-            switch filterOption {
+            // Filter
+            switch selectedFilter {
             case .all:
                 return true
             case .transcribed:
                 return hasTranscription(for: session)
             case .notTranscribed:
-                return !hasTranscription(for: session) && !isTranscribing(session: session)
+                return !hasTranscription(for: session) && !isTranscribing(session)
             case .processing:
-                return isTranscribing(session: session)
+                return isTranscribing(session)
             }
         }
         
-        return recordings
+        return recordings.sorted { $0.startTime > $1.startTime }
     }
     
     private var groupedRecordings: [Date: [RecordingSession]] {
@@ -302,25 +221,27 @@ struct RecordingSessionListView: View {
     // MARK: - Helper Methods
     
     private func hasTranscription(for session: RecordingSession) -> Bool {
-        let text = transcriptionManager.getTranscriptionText(for: session.id)
-        return text != nil && !text!.isEmpty
+        if let text = transcriptionManager.getTranscriptionText(for: session.id) {
+            return !text.isEmpty
+        }
+        return false
     }
     
-    private func isTranscribing(session: RecordingSession) -> Bool {
+    private func isTranscribing(_ session: RecordingSession) -> Bool {
         return transcriptionManager.activeJobs.contains { $0.sessionId == session.id }
     }
     
-    private func countForFilter(_ option: FilterOption) -> Int {
+    private func countForFilter(_ filter: FilterOption) -> Int {
         fileManagerService.recordings.filter { session in
-            switch option {
+            switch filter {
             case .all:
                 return true
             case .transcribed:
                 return hasTranscription(for: session)
             case .notTranscribed:
-                return !hasTranscription(for: session) && !isTranscribing(session: session)
+                return !hasTranscription(for: session) && !isTranscribing(session)
             case .processing:
-                return isTranscribing(session: session)
+                return isTranscribing(session)
             }
         }.count
     }
@@ -329,27 +250,30 @@ struct RecordingSessionListView: View {
     
     private func deleteRecording(_ session: RecordingSession) {
         do {
-            // Also cleanup any transcription data
             transcriptionManager.stopTranscriptionJob(session.id)
             AudioSegmentProcessor.shared.cleanupSegmentFiles(for: session.id)
-            
             try fileManagerService.deleteRecording(session)
         } catch {
-            Logger.shared.error("Failed to delete recording: \(error)")
+            showError("Failed to delete recording: \(error.localizedDescription)")
         }
     }
     
     private func startTranscription(for session: RecordingSession) {
-        let _ = transcriptionManager.startTranscriptionJob(for: session)
+        _ = transcriptionManager.startTranscriptionJob(for: session)
     }
     
     private func shareTranscription(for session: RecordingSession) {
         guard let text = transcriptionManager.getTranscriptionText(for: session.id) else { return }
-        
-        let activityVC = UIActivityViewController(
-            activityItems: [text],
-            applicationActivities: nil
-        )
+        shareContent([text])
+    }
+    
+    private func shareRecording(_ session: RecordingSession) {
+        guard let fileURL = session.fileURL else { return }
+        shareContent([fileURL])
+    }
+    
+    private func shareContent(_ items: [Any]) {
+        let activityVC = UIActivityViewController(activityItems: items, applicationActivities: nil)
         
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
            let window = windowScene.windows.first,
@@ -358,26 +282,68 @@ struct RecordingSessionListView: View {
         }
     }
     
-    private func shareRecording(_ session: RecordingSession) {
-        guard let fileURL = session.fileURL else { return }
+    private func showError(_ message: String) {
+        errorMessage = message
+        showingError = true
+    }
+    
+    private func refreshData() async {
+        DispatchQueue.main.async {
+            self.fileManagerService.objectWillChange.send()
+            self.transcriptionManager.objectWillChange.send()
+        }
+    }
+    
+    // MARK: - Context Actions
+    
+    @ViewBuilder
+    private func swipeActions(for session: RecordingSession) -> some View {
+        if hasTranscription(for: session) {
+            Button("View") {
+                selectedSession = session
+            }
+            .tint(.blue)
+        } else if !isTranscribing(session) {
+            Button("Transcribe") {
+                startTranscription(for: session)
+            }
+            .tint(.green)
+        }
         
-        let activityVC = UIActivityViewController(
-            activityItems: [fileURL],
-            applicationActivities: nil
-        )
+        Button("Delete") {
+            sessionToDelete = session
+            showingDeleteAlert = true
+        }
+        .tint(.red)
+    }
+    
+    @ViewBuilder
+    private func contextMenuActions(for session: RecordingSession) -> some View {
+        Button("Open", action: { selectedSession = session })
         
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let window = windowScene.windows.first,
-           let rootVC = window.rootViewController {
-            rootVC.present(activityVC, animated: true)
+        Divider()
+        
+        if hasTranscription(for: session) {
+            Button("Share Transcription", action: { shareTranscription(for: session) })
+        } else if !isTranscribing(session) {
+            Button("Start Transcription", action: { startTranscription(for: session) })
+        }
+        
+        Button("Share Recording", action: { shareRecording(session) })
+        
+        Divider()
+        
+        Button("Delete", role: .destructive) {
+            sessionToDelete = session
+            showingDeleteAlert = true
         }
     }
 }
 
 // MARK: - Supporting Views
 
-struct FilterPill: View {
-    let option: RecordingSessionListView.FilterOption
+struct FilterChip: View {
+    let filter: RecordingSessionListView.FilterOption
     let isSelected: Bool
     let count: Int
     let action: () -> Void
@@ -385,39 +351,102 @@ struct FilterPill: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Image(systemName: option.systemImage)
+                Image(systemName: filter.icon)
                     .font(.caption)
                 
-                Text(option.rawValue)
-                    .font(.caption)
+                Text(filter.rawValue)
+                    .font(.subheadline)
                     .fontWeight(.medium)
                 
                 if count > 0 {
-                    Text("(\(count))")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                    Text("\(count)")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(isSelected ? .white.opacity(0.8) : .secondary)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
             .background(
                 Capsule()
-                    .fill(isSelected ? Color.blue : Color(.systemGray5))
+                    .fill(isSelected ? filter.color : Color(.systemGray6))
             )
             .foregroundColor(isSelected ? .white : .primary)
         }
-        .buttonStyle(PlainButtonStyle())
+        .buttonStyle(.plain)
     }
 }
 
-struct RecordingSessionRow: View {
-    let session: RecordingSession
-    
-    @ObservedObject private var transcriptionManager = TranscriptionManager.shared
+struct SectionHeader: View {
+    let date: Date
+    let sessions: [RecordingSession]
+    let transcriptionManager: TranscriptionManager
     
     var body: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(date.formatted(.dateTime.weekday(.wide).month().day()))
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                
+                Text(relativeDateText)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            if transcribedCount > 0 {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    
+                    Text("\(transcribedCount)/\(sessions.count)")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(Color(.systemGroupedBackground))
+    }
+    
+    private var transcribedCount: Int {
+        sessions.filter { session in
+            if let text = transcriptionManager.getTranscriptionText(for: session.id) {
+                return !text.isEmpty
+            }
+            return false
+        }.count
+    }
+    
+    private var relativeDateText: String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return "Today"
+        } else if calendar.isDateInYesterday(date) {
+            return "Yesterday"
+        } else {
+            return date.formatted(.dateTime.year())
+        }
+    }
+}
+
+struct SessionRow: View {
+    let session: RecordingSession
+    @ObservedObject private var transcriptionManager = TranscriptionManager.shared
+    
+    var body: some View {
+        HStack(spacing: 16) {
+            // Status indicator
+            statusIndicator
+            
+            // Content
+            VStack(alignment: .leading, spacing: 6) {
+                // Title and duration
                 HStack {
                     Text(session.title)
                         .font(.headline)
@@ -427,11 +456,19 @@ struct RecordingSessionRow: View {
                     
                     Text(session.formattedDuration)
                         .font(.caption)
+                        .fontWeight(.medium)
                         .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(Color(.systemGray6))
+                        )
                 }
                 
+                // Time and size
                 HStack {
-                    Text(session.startTime, style: .time)
+                    Text(session.startTime.formatted(.dateTime.hour().minute()))
                         .font(.caption)
                         .foregroundColor(.secondary)
                     
@@ -445,85 +482,65 @@ struct RecordingSessionRow: View {
                 }
                 
                 // Transcription status
-                transcriptionStatusView
-            }
-            
-            // Transcription indicator
-            VStack {
-                transcriptionIndicator
-                Spacer()
+                transcriptionStatus
             }
         }
-        .padding(.vertical, 2)
+        .padding()
+        .background(Color(.systemBackground))
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
     }
     
-    private var transcriptionStatusView: some View {
+    private var statusIndicator: some View {
+        ZStack {
+            Circle()
+                .fill(statusColor.opacity(0.15))
+                .frame(width: 40, height: 40)
+            
+            Image(systemName: statusIcon)
+                .font(.caption)
+                .foregroundColor(statusColor)
+        }
+    }
+    
+    private var transcriptionStatus: some View {
         Group {
             if let job = currentJob {
                 if job.isCompleted {
                     if job.hasFailures && job.completedSegments == 0 {
-                        // Completely failed
-                        Label("Transcription failed", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption2)
-                            .foregroundColor(.red)
+                        statusLabel("Failed", color: .red, icon: "exclamationmark.triangle.fill")
                     } else if job.hasFailures {
-                        // Partially failed
-                        Label("Partial transcription (\(job.completedSegments)/\(job.totalSegments))", systemImage: "checkmark.circle.fill")
-                            .font(.caption2)
-                            .foregroundColor(.orange)
+                        statusLabel("Partial (\(job.completedSegments)/\(job.totalSegments))",
+                                  color: .orange, icon: "checkmark.circle.badge.exclamationmark")
                     } else {
-                        // Completely successful
-                        Label("Transcription complete", systemImage: "checkmark.circle.fill")
-                            .font(.caption2)
-                            .foregroundColor(.green)
+                        statusLabel("Transcribed", color: .green, icon: "checkmark.circle.fill")
                     }
                 } else {
-                    // In progress
                     HStack(spacing: 4) {
                         ProgressView()
-                            .scaleEffect(0.6)
+                            .scaleEffect(0.7)
                         
-                        Text("Transcribing... \(Int(job.progress * 100))%")
-                            .font(.caption2)
+                        Text("Transcribing \(Int(job.progress * 100))%")
+                            .font(.caption)
                             .foregroundColor(.blue)
                     }
                 }
             } else if hasTranscription {
-                // Has transcription but no job (legacy or external)
-                Label("Transcription available", systemImage: "checkmark.circle.fill")
-                    .font(.caption2)
-                    .foregroundColor(.green)
+                statusLabel("Transcribed", color: .green, icon: "doc.text.fill")
             }
         }
     }
     
-    private var transcriptionIndicator: some View {
-        Group {
-            if let job = currentJob {
-                if job.isCompleted {
-                    if job.hasFailures && job.completedSegments == 0 {
-                        Image(systemName: "exclamationmark.circle.fill")
-                            .foregroundColor(.red)
-                    } else if job.hasFailures {
-                        Image(systemName: "checkmark.circle.badge.exclamationmark")
-                            .foregroundColor(.orange)
-                    } else {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                    }
-                } else {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                }
-            } else if hasTranscription {
-                Image(systemName: "doc.text.fill")
-                    .foregroundColor(.blue)
-            } else {
-                Image(systemName: "circle")
-                    .foregroundColor(.gray)
-            }
+    private func statusLabel(_ text: String, color: Color, icon: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.caption2)
+            
+            Text(text)
+                .font(.caption)
+                .fontWeight(.medium)
         }
-        .font(.caption)
+        .foregroundColor(color)
     }
     
     // MARK: - Computed Properties
@@ -534,7 +551,113 @@ struct RecordingSessionRow: View {
     }
     
     private var hasTranscription: Bool {
-        let text = transcriptionManager.getTranscriptionText(for: session.id)
-        return text != nil && !text!.isEmpty
+        if let text = transcriptionManager.getTranscriptionText(for: session.id) {
+            return !text.isEmpty
+        }
+        return false
+    }
+    
+    private var statusColor: Color {
+        if let job = currentJob {
+            if job.isCompleted {
+                return job.hasFailures ? (job.completedSegments > 0 ? .orange : .red) : .green
+            } else {
+                return .blue
+            }
+        } else if hasTranscription {
+            return .green
+        } else {
+            return .gray
+        }
+    }
+    
+    private var statusIcon: String {
+        if let job = currentJob {
+            if job.isCompleted {
+                if job.hasFailures && job.completedSegments == 0 {
+                    return "exclamationmark.triangle.fill"
+                } else if job.hasFailures {
+                    return "checkmark.circle.badge.exclamationmark"
+                } else {
+                    return "checkmark.circle.fill"
+                }
+            } else {
+                return "clock.fill"
+            }
+        } else if hasTranscription {
+            return "doc.text.fill"
+        } else {
+            return "waveform"
+        }
+    }
+}
+
+struct EmptyStateView: View {
+    let filter: RecordingSessionListView.FilterOption
+    let searchText: String
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Image(systemName: emptyIcon)
+                .font(.system(size: 64))
+                .foregroundColor(.secondary.opacity(0.6))
+            
+            VStack(spacing: 8) {
+                Text(emptyTitle)
+                    .font(.title3)
+                    .fontWeight(.medium)
+                
+                Text(emptyMessage)
+                    .font(.body)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemGroupedBackground))
+    }
+    
+    private var emptyIcon: String {
+        if !searchText.isEmpty {
+            return "magnifyingglass"
+        }
+        
+        switch filter {
+        case .all: return "mic.slash"
+        case .transcribed: return "doc.text"
+        case .notTranscribed: return "text.badge.xmark"
+        case .processing: return "clock"
+        }
+    }
+    
+    private var emptyTitle: String {
+        if !searchText.isEmpty {
+            return "No Results"
+        }
+        
+        switch filter {
+        case .all: return "No Recordings"
+        case .transcribed: return "No Transcriptions"
+        case .notTranscribed: return "All Transcribed"
+        case .processing: return "Nothing Processing"
+        }
+    }
+    
+    private var emptyMessage: String {
+        if !searchText.isEmpty {
+            return "Try adjusting your search terms or filters."
+        }
+        
+        switch filter {
+        case .all:
+            return "Your recordings will appear here after you make them."
+        case .transcribed:
+            return "Recordings with completed transcriptions will appear here."
+        case .notTranscribed:
+            return "Great! All your recordings have been transcribed."
+        case .processing:
+            return "Recordings currently being transcribed will appear here."
+        }
     }
 }

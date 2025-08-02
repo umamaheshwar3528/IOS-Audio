@@ -7,13 +7,16 @@ struct RecordingView: View {
     @ObservedObject private var transcriptionManager = TranscriptionManager.shared
     @ObservedObject private var networkMonitor = NetworkMonitorService.shared
     @ObservedObject private var settingsService = SettingsService.shared
+    @ObservedObject private var fileManagerService = FileManagerService.shared
     
     @State private var showingSessionList = false
     @State private var showingSettings = false
+    @State private var showingTranscriptionSettings = false
     @State private var showingError = false
     @State private var errorMessage = ""
     @State private var pulseAnimation = false
     @State private var waveAnimation = false
+    @State private var currentSessionTranscription: UUID?
     
     var body: some View {
         NavigationView {
@@ -45,12 +48,15 @@ struct RecordingView: View {
                     HStack(spacing: 16) {
                         // Transcription indicator
                         if transcriptionManager.isProcessing {
-                            TranscriptionStatusButton {
-                                // Show transcription details
+                            TranscriptionStatusButton(
+                                progress: transcriptionManager.currentProgress,
+                                activeJobs: transcriptionManager.activeJobs.count
+                            ) {
+                                showingTranscriptionSettings = true
                             }
                         }
                         
-                        SessionsButton(count: recordingManager.totalSessions) {
+                        SessionsButton(count: fileManagerService.recordings.count) {
                             showingSessionList = true
                         }
                     }
@@ -61,6 +67,9 @@ struct RecordingView: View {
             }
             .sheet(isPresented: $showingSettings) {
                 SettingsView()
+            }
+            .sheet(isPresented: $showingTranscriptionSettings) {
+                TranscriptionStatusSheet()
             }
             .alert("Recording Error", isPresented: $showingError) {
                 Button("OK") {}
@@ -91,11 +100,23 @@ struct RecordingView: View {
                     .transition(.scale.combined(with: .opacity))
             }
             
+            // Transcription progress (during recording)
+            if recordingManager.currentState.isRecording && settingsService.settings.enableAutoTranscription {
+                transcriptionProgressSection
+                    .transition(.scale.combined(with: .opacity))
+            }
+            
+            // Recent transcription results (after recording)
+            if !recordingManager.currentState.isRecording && currentSessionTranscription != nil {
+                recentTranscriptionSection
+                    .transition(.scale.combined(with: .opacity))
+            }
+            
             Spacer()
             
             // Controls
             controlsSection
-            
+            Spacer(minLength: 10)
             // Status banners
             statusBannersSection
             
@@ -103,6 +124,11 @@ struct RecordingView: View {
         }
         .padding(.horizontal, 24)
         .animation(.smooth(duration: 0.4), value: recordingManager.currentState)
+        .onReceive(NotificationCenter.default.publisher(for: .recordingSessionCompleted)) { notification in
+            if let session = notification.object as? RecordingSession {
+                handleRecordingCompleted(session)
+            }
+        }
     }
     
     // MARK: - Recording Display
@@ -185,6 +211,74 @@ struct RecordingView: View {
         .padding(.horizontal)
     }
     
+    // MARK: - Transcription Sections
+    
+    private var transcriptionProgressSection: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Image(systemName: "waveform.badge.magnifyingglass")
+                    .foregroundColor(.blue)
+                
+                Text("Live Transcription")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                
+                Spacer()
+                
+                if let currentSession = recordingManager.currentSession {
+                    let activeJob = transcriptionManager.activeJobs.first { $0.sessionId == currentSession.id }
+                    if let job = activeJob {
+                        Text("\(job.completedSegments) segments")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            
+            if let currentSession = recordingManager.currentSession {
+                LiveTranscriptionPreview(sessionId: currentSession.id)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemBackground))
+                .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
+        )
+    }
+    
+    private var recentTranscriptionSection: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+                
+                Text("Recording Complete")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                
+                Spacer()
+                
+                Button("View Details") {
+                    showingSessionList = true
+                }
+                .font(.caption)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            
+            if let sessionId = currentSessionTranscription {
+                TranscriptionResultPreview(sessionId: sessionId)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemBackground))
+                .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
+        )
+    }
+    
     // MARK: - Controls
     
     private var controlsSection: some View {
@@ -260,7 +354,7 @@ struct RecordingView: View {
     }
     
     private var canRecord: Bool {
-        !recordingManager.currentState.isError
+        !recordingManager.currentState.isPaused
     }
     
     private var canStop: Bool {
@@ -332,6 +426,25 @@ struct RecordingView: View {
     private func startPulseAnimation() {
         withAnimation(.easeInOut(duration: 2.0).repeatForever()) {
             pulseAnimation = true
+        }
+    }
+    
+    private func handleRecordingCompleted(_ session: RecordingSession) {
+        // Show transcription status for the completed recording
+        currentSessionTranscription = session.id
+        
+        // Auto-start transcription if enabled
+        if settingsService.settings.enableAutoTranscription {
+            let _ = transcriptionManager.startTranscriptionJob(for: session)
+        }
+        
+        // Auto-hide after delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            if currentSessionTranscription == session.id {
+                withAnimation {
+                    currentSessionTranscription = nil
+                }
+            }
         }
     }
 }
@@ -489,8 +602,9 @@ struct TranscriptionProgressBanner: View {
 }
 
 struct TranscriptionStatusButton: View {
+    let progress: Float
+    let activeJobs: Int
     let action: () -> Void
-    @ObservedObject private var transcriptionManager = TranscriptionManager.shared
     
     var body: some View {
         Button(action: action) {
@@ -498,9 +612,17 @@ struct TranscriptionStatusButton: View {
                 ProgressView()
                     .scaleEffect(0.7)
                 
-                Text("\(Int(transcriptionManager.currentProgress * 100))%")
-                    .font(.caption)
-                    .fontWeight(.medium)
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("\(Int(progress * 100))%")
+                        .font(.caption2)
+                        .fontWeight(.medium)
+                    
+                    if activeJobs > 1 {
+                        Text("\(activeJobs) jobs")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
             .foregroundColor(.blue)
         }
@@ -521,6 +643,12 @@ struct SessionsButton: View {
                     Text("\(count)")
                         .font(.caption)
                         .fontWeight(.medium)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(Color(.systemGray5))
+                        )
                 }
             }
             .foregroundColor(.primary)
@@ -528,18 +656,297 @@ struct SessionsButton: View {
     }
 }
 
-// MARK: - Extensions
+// MARK: - Live Transcription Views
 
-extension RecordingState {
-    var isError: Bool {
-        if case .error = self { return true }
-        return false
+struct LiveTranscriptionPreview: View {
+    let sessionId: UUID
+    @ObservedObject private var transcriptionManager = TranscriptionManager.shared
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            if let latestText = latestTranscriptionText {
+                ScrollView {
+                    Text(latestText)
+                        .font(.body)
+                        .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: 60)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(.systemGray6))
+                )
+            } else {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    
+                    Text("Waiting for transcription...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(height: 60)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(.systemGray6))
+                )
+            }
+            
+            // Progress indicator
+            if let job = activeJob {
+                HStack {
+                    Text("Processing segments")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    
+                    Spacer()
+                    
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                        
+                        Text("Live")
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                    }
+                }
+            }
+        }
+    }
+    
+    private var activeJob: TranscriptionJob? {
+        transcriptionManager.activeJobs.first { $0.sessionId == sessionId }
+    }
+    
+    private var latestTranscriptionText: String? {
+        guard let job = activeJob else { return nil }
+        
+        let completedSegments = job.segments
+            .filter { $0.status == .completed }
+            .sorted { $0.segmentIndex < $1.segmentIndex }
+        
+        // Return the latest completed segment text or partial job text
+        if let latestSegment = completedSegments.last {
+            return latestSegment.transcriptionText
+        }
+        
+        // Return partial job text if available
+        let partialText = job.fullTranscriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return partialText.isEmpty ? nil : partialText
     }
 }
 
-extension AudioRecordingManager {
-    var totalSessions: Int {
-        // This would need to be implemented to return total session count
-        return 0
+struct TranscriptionResultPreview: View {
+    let sessionId: UUID
+    @ObservedObject private var transcriptionManager = TranscriptionManager.shared
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let job = currentJob {
+                // Progress
+                ProgressView(value: job.progress)
+                    .tint(.blue)
+                
+                HStack {
+                    Text("\(job.completedSegments) of \(job.totalSegments) segments")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Spacer()
+                    
+                    if job.hasFailures {
+                        Text("\(job.failedSegments) failed")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    } else {
+                        Text("\(Int(job.progress * 100))%")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.blue)
+                    }
+                }
+                
+                // Preview text
+                if let transcriptionText = transcriptionText, !transcriptionText.isEmpty {
+                    let previewText = String(transcriptionText.prefix(100))
+                    Text(previewText + (transcriptionText.count > 100 ? "..." : ""))
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                        .padding(.top, 4)
+                }
+            } else {
+                Text("Starting transcription...")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+    
+    private var currentJob: TranscriptionJob? {
+        transcriptionManager.activeJobs.first { $0.sessionId == sessionId } ??
+        transcriptionManager.completedJobs.first { $0.sessionId == sessionId }
+    }
+    
+    private var transcriptionText: String? {
+        transcriptionManager.getTranscriptionText(for: sessionId)
+    }
+}
+
+struct TranscriptionStatusSheet: View {
+    @ObservedObject private var transcriptionManager = TranscriptionManager.shared
+    @ObservedObject private var networkMonitor = NetworkMonitorService.shared
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                LazyVStack(spacing: 20) {
+                    // Overall status
+                    overallStatusCard
+                    
+                    // Active jobs
+                    if !transcriptionManager.activeJobs.isEmpty {
+                        activeJobsCard
+                    }
+                    
+                    // Network status
+                    networkStatusCard
+                }
+                .padding()
+            }
+            .navigationTitle("Transcription Status")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+    
+    private var overallStatusCard: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Overall Status")
+                    .font(.headline)
+                
+                Spacer()
+                
+                if transcriptionManager.isProcessing {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Processing")
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                    }
+                } else {
+                    Text("Idle")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            if transcriptionManager.isProcessing {
+                ProgressView(value: transcriptionManager.currentProgress)
+                    .tint(.blue)
+                
+                Text(transcriptionManager.processingStatus)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemBackground))
+        )
+    }
+    
+    private var activeJobsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Active Jobs")
+                .font(.headline)
+            
+            ForEach(transcriptionManager.activeJobs) { job in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Session \(job.sessionId.uuidString.prefix(8))")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        
+                        Spacer()
+                        
+                        Text("\(Int(job.progress * 100))%")
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                    }
+                    
+                    ProgressView(value: job.progress)
+                        .tint(.blue)
+                    
+                    HStack {
+                        Text("\(job.completedSegments)/\(job.totalSegments) segments")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        
+                        Spacer()
+                        
+                        if job.hasFailures {
+                            Text("\(job.failedSegments) failed")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                        }
+                    }
+                }
+                .padding()
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(.systemGray6))
+                )
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemBackground))
+        )
+    }
+    
+    private var networkStatusCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Network Status")
+                    .font(.headline)
+                
+                Spacer()
+                
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(networkMonitor.isConnected ? Color.green : Color.red)
+                        .frame(width: 8, height: 8)
+                    
+                    Text(networkMonitor.isConnected ? "Connected" : "Offline")
+                        .font(.caption)
+                        .foregroundColor(networkMonitor.isConnected ? .green : .red)
+                }
+            }
+            
+            if !networkMonitor.isConnected {
+                Text("Segments will be queued until connection is restored")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemBackground))
+        )
     }
 }

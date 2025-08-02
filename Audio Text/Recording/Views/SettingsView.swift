@@ -1,12 +1,6 @@
 import SwiftUI
 import AVFoundation
 
-extension Bundle {
-    var appVersion: String {
-        return infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-    }
-}
-
 struct SettingsView: View {
     @ObservedObject private var settingsService = SettingsService.shared
     @ObservedObject private var authManager = AuthenticationManager.shared
@@ -17,9 +11,10 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var localSettings: RecordingSettings
     @State private var showingResetAlert = false
-    @State private var showingTranscriptionLanguageInfo = false
     @State private var showingAPIKeySetup = false
-    @State private var showingTranscriptionHelp = false
+    @State private var showingError = false
+    @State private var errorMessage = ""
+    @State private var isLoading = false
     
     init() {
         _localSettings = State(initialValue: SettingsService.shared.settings)
@@ -28,32 +23,27 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                // Audio Quality Section
-                audioQualitySection
+                // Quick Settings
+                quickSettingsSection
                 
-                // Recording Options Section
-                recordingOptionsSection
+                // Audio Settings
+                audioSection
                 
-                // Transcription Settings Section
-                transcriptionSettingsSection
+                // Transcription Settings
+                transcriptionSection
                 
-                // API Configuration Section
-                apiConfigurationSection
+                // Services Status
+                servicesSection
                 
-                // Battery & Performance Section
-                batteryPerformanceSection
+                // Storage & Performance
+                storageSection
                 
-                // Storage Info Section
-                storageInfoSection
-                
-                // Advanced Section
-                advancedSection
-                
-                // Reset Section
-                resetSection
+                // About & Reset
+                aboutSection
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.large)
+            .background(Color(.systemGroupedBackground))
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Cancel") {
@@ -66,6 +56,7 @@ struct SettingsView: View {
                         saveSettings()
                     }
                     .fontWeight(.semibold)
+                    .disabled(isLoading)
                 }
             }
             .alert("Reset Settings", isPresented: $showingResetAlert) {
@@ -76,305 +67,93 @@ struct SettingsView: View {
             } message: {
                 Text("This will reset all settings to their default values.")
             }
-            .sheet(isPresented: $showingTranscriptionLanguageInfo) {
-                TranscriptionLanguageInfoView(service: localSettings.preferredTranscriptionService ?? .none)
+            .alert("Error", isPresented: $showingError) {
+                Button("OK") {}
+            } message: {
+                Text(errorMessage)
             }
             .sheet(isPresented: $showingAPIKeySetup) {
                 APIKeyConfigurationView()
             }
-            .sheet(isPresented: $showingTranscriptionHelp) {
-                TranscriptionHelpView()
-            }
         }
     }
     
-    // MARK: - Audio Quality Section
+    // MARK: - Quick Settings
     
-    private var audioQualitySection: some View {
-        Section("Audio Quality") {
-            Picker("Quality", selection: $localSettings.audioQuality) {
-                ForEach(AudioConfiguration.Quality.allCases, id: \.self) { quality in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(quality.rawValue)
-                        Text("\(Int(quality.sampleRate)) Hz, \(quality.bitDepth)-bit")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .tag(quality)
-                }
-            }
-            .pickerStyle(.menu)
-            
-            Text("Higher quality uses more storage space")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-    }
-    
-    // MARK: - Recording Options Section
-    
-    private var recordingOptionsSection: some View {
-        Section("Recording Options") {
-            Toggle("Background Recording", isOn: $localSettings.backgroundRecordingEnabled)
-            Toggle("Show Audio Levels", isOn: $localSettings.showAudioLevels)
-            Toggle("Auto-save Recordings", isOn: $localSettings.autoSaveEnabled)
-        }
-    }
-    
-    // MARK: - Transcription Settings Section
-    
-    private var transcriptionSettingsSection: some View {
+    private var quickSettingsSection: some View {
         Section {
-            VStack(alignment: .leading, spacing: 12) {
+            QuickToggle(
+                title: "Auto-transcribe Recordings",
+                subtitle: "Start transcription automatically",
+                isOn: $localSettings.enableAutoTranscription,
+                icon: "waveform.badge.magnifyingglass",
+                color: .blue
+            )
+            
+            QuickToggle(
+                title: "Background Recording",
+                subtitle: "Continue recording in background",
+                isOn: $localSettings.backgroundRecordingEnabled,
+                icon: "app.badge",
+                color: .green
+            )
+            
+            QuickToggle(
+                title: "Show Audio Levels",
+                subtitle: "Display live audio visualization",
+                isOn: $localSettings.showAudioLevels,
+                icon: "waveform",
+                color: .orange
+            )
+        } header: {
+            Text("Quick Settings")
+        }
+    }
+    
+    // MARK: - Audio Section
+    
+    private var audioSection: some View {
+        Section {
+            // Quality picker
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Transcription Settings")
-                        .font(.headline)
+                    Image(systemName: "dial.high")
+                        .foregroundColor(.blue)
+                        .frame(width: 24)
+                    
+                    Text("Recording Quality")
+                        .font(.subheadline)
                     
                     Spacer()
-                    
-                    Button(action: { showingTranscriptionHelp = true }) {
-                        Image(systemName: "questionmark.circle")
-                            .foregroundColor(.blue)
-                    }
                 }
                 
-                Toggle("Auto-transcribe Recordings", isOn: $localSettings.enableAutoTranscription)
-                
-                if localSettings.enableAutoTranscription {
-                    VStack(alignment: .leading, spacing: 8) {
-                        // Service Selection
-                        servicePicker
-                        
-                        // Service Status
-                        serviceStatusView
-                        
-                        // Service Options
-                        serviceOptionsView
-                    }
-                }
-            }
-        } footer: {
-            if localSettings.enableAutoTranscription {
-                Text("Recordings will be automatically transcribed using your preferred service. You can always change this per recording.")
-            }
-        }
-    }
-    
-    private var servicePicker: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Preferred Service")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            
-            Picker("Transcription Service", selection: $localSettings.preferredTranscriptionService) {
-                Text("Auto-select").tag(nil as TranscriptionService?)
-                
-                ForEach(TranscriptionService.allCases.filter { $0 != .none }, id: \.self) { service in
-                    HStack {
-                        Text(service.displayName)
-                        Spacer()
-                        serviceAvailabilityIndicator(for: service)
-                    }
-                    .tag(service as TranscriptionService?)
-                }
-            }
-            .pickerStyle(.menu)
-        }
-    }
-    
-    private var serviceStatusView: some View {
-        VStack(spacing: 8) {
-            ForEach(TranscriptionService.allCases.filter { $0 != .none }, id: \.self) { service in
-                serviceStatusRow(for: service)
-            }
-        }
-    }
-    
-    private func serviceStatusRow(for service: TranscriptionService) -> some View {
-        HStack {
-            HStack(spacing: 8) {
-                Image(systemName: serviceIcon(for: service))
-                    .foregroundColor(serviceColor(for: service))
-                    .frame(width: 20)
-                
-                Text(service.displayName)
-                    .font(.subheadline)
-            }
-            
-            Spacer()
-            
-            serviceStatusIndicator(for: service)
-        }
-        .padding(.vertical, 2)
-    }
-    
-    private func serviceAvailabilityIndicator(for service: TranscriptionService) -> some View {
-        Circle()
-            .fill(isServiceAvailable(service) ? Color.green : Color.red)
-            .frame(width: 8, height: 8)
-    }
-    
-    private func serviceStatusIndicator(for service: TranscriptionService) -> some View {
-        Group {
-            if isServiceAvailable(service) {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                    Text("Available")
-                        .font(.caption)
-                        .foregroundColor(.green)
-                }
-            } else {
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .foregroundColor(.red)
-                    Text(serviceUnavailableReason(for: service))
-                        .font(.caption)
-                        .foregroundColor(.red)
-                }
-            }
-        }
-    }
-    
-    private var serviceOptionsView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let service = localSettings.preferredTranscriptionService, service.requiresNetwork {
-                Toggle("Allow Cellular Data", isOn: $localSettings.allowCellularTranscription)
-                    .disabled(!networkMonitor.isConnected)
-            }
-            
-            Toggle("Service Fallback", isOn: $localSettings.allowServiceFallback)
-                .disabled(localSettings.preferredTranscriptionService == .none)
-            
-            Toggle("Prefer Local Processing", isOn: $localSettings.preferLocalProcessing)
-            
-            HStack {
-                Text("Max Retry Attempts")
-                    .font(.subheadline)
-                
-                Spacer()
-                
-                Picker("Retry Attempts", selection: $localSettings.maxRetryAttempts) {
-                    ForEach(1...10, id: \.self) { count in
-                        Text("\(count)").tag(count)
+                Picker("Quality", selection: $localSettings.audioQuality) {
+                    ForEach(AudioConfiguration.Quality.allCases, id: \.self) { quality in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(quality.rawValue.capitalized)
+                                .font(.subheadline)
+                            Text(quality.description)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .tag(quality)
                     }
                 }
                 .pickerStyle(.menu)
             }
             
-            Button("Supported Languages") {
-                showingTranscriptionLanguageInfo = true
-            }
-            .font(.subheadline)
-            .foregroundColor(.blue)
-        }
-    }
-    
-    // MARK: - API Configuration Section
-    
-    private var apiConfigurationSection: some View {
-        Section {
-            // OpenAI Configuration
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("OpenAI API Key")
-                        .font(.subheadline)
-                    
-                    if authManager.hasValidOpenAIKey {
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                            Text("Configured")
-                                .font(.caption)
-                                .foregroundColor(.green)
-                        }
-                    } else {
-                        HStack(spacing: 4) {
-                            Image(systemName: "exclamationmark.circle.fill")
-                                .foregroundColor(.orange)
-                            Text("Not configured")
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                        }
-                    }
-                }
-                
-                Spacer()
-                
-                Button(authManager.hasValidOpenAIKey ? "Update" : "Configure") {
-                    showingAPIKeySetup = true
-                }
-                .buttonStyle(.bordered)
-            }
-            
-            // Apple Speech Configuration
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Apple Speech Recognition")
-                        .font(.subheadline)
-                    
-                    switch appleService.authorizationStatus {
-                    case .authorized:
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                            Text("Authorized")
-                                .font(.caption)
-                                .foregroundColor(.green)
-                        }
-                    case .denied, .restricted:
-                        HStack(spacing: 4) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.red)
-                            Text("Access denied")
-                                .font(.caption)
-                                .foregroundColor(.red)
-                        }
-                    case .notDetermined:
-                        HStack(spacing: 4) {
-                            Image(systemName: "questionmark.circle.fill")
-                                .foregroundColor(.orange)
-                            Text("Not requested")
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                        }
-                    @unknown default:
-                        HStack(spacing: 4) {
-                            Image(systemName: "questionmark.circle.fill")
-                                .foregroundColor(.gray)
-                            Text("Unknown")
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                        }
-                    }
-                }
-                
-                Spacer()
-                
-                if appleService.authorizationStatus != .authorized {
-                    Button("Request Access") {
-                        Task {
-                            await appleService.requestSpeechAuthorization()
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                }
-            }
-        } header: {
-            Text("API Configuration")
-        } footer: {
-            Text("OpenAI Whisper provides the highest accuracy for multiple languages. Apple Speech Recognition works offline but supports fewer languages.")
-        }
-    }
-    
-    // MARK: - Battery & Performance Section
-    
-    private var batteryPerformanceSection: some View {
-        Section("Battery & Performance") {
-            Toggle("Auto-stop on Low Battery", isOn: $localSettings.autoStopOnLowBattery)
-            
+            // Max duration
             VStack(alignment: .leading, spacing: 8) {
-                Text("Maximum Recording Duration")
+                HStack {
+                    Image(systemName: "timer")
+                        .foregroundColor(.orange)
+                        .frame(width: 24)
+                    
+                    Text("Max Recording Duration")
+                        .font(.subheadline)
+                    
+                    Spacer()
+                }
                 
                 Picker("Duration", selection: $localSettings.maxRecordingDuration) {
                     Text("30 minutes").tag(TimeInterval(1800))
@@ -386,107 +165,175 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
             }
             
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Concurrent Transcriptions")
+        } header: {
+            Text("Audio Settings")
+        } footer: {
+            Text("Higher quality settings use more storage space and battery.")
+        }
+    }
+    
+    // MARK: - Transcription Section
+    
+    private var transcriptionSection: some View {
+        Section {
+            if localSettings.enableAutoTranscription {
+                // Service selection
+                serviceSelectionView
+                
+                // Service options
+                serviceOptionsView
+            } else {
+                HStack {
+                    Image(systemName: "info.circle")
+                        .foregroundColor(.blue)
+                    
+                    Text("Enable auto-transcription to configure transcription services")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+        } header: {
+            Text("Transcription")
+        } footer: {
+            if localSettings.enableAutoTranscription {
+                Text("Transcription converts your audio recordings to searchable text.")
+            }
+        }
+    }
+    
+    private var serviceSelectionView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "brain")
+                    .foregroundColor(.purple)
+                    .frame(width: 24)
+                
+                Text("Preferred Service")
                     .font(.subheadline)
                 
-                Picker("Concurrent Transcriptions", selection: $localSettings.maxConcurrentTranscriptions) {
-                    ForEach(1...5, id: \.self) { count in
-                        Text("\(count)").tag(count)
+                Spacer()
+            }
+            
+            Picker("Service", selection: $localSettings.preferredTranscriptionService) {
+                Text("Auto-select").tag(nil as TranscriptionService?)
+                
+                ForEach(TranscriptionService.allCases.filter { $0 != .none }, id: \.self) { service in
+                    HStack {
+                        Text(service.displayName)
+                        Spacer()
+                        serviceStatusDot(for: service)
+                    }
+                    .tag(service as TranscriptionService?)
+                }
+            }
+            .pickerStyle(.menu)
+        }
+    }
+    
+    private var serviceOptionsView: some View {
+        Group {
+            QuickToggle(
+                title: "Allow Service Fallback",
+                subtitle: "Try other services if preferred fails",
+                isOn: $localSettings.allowServiceFallback,
+                icon: "arrow.triangle.swap",
+                color: .cyan
+            )
+            
+            if localSettings.preferredTranscriptionService?.requiresNetwork == true {
+                QuickToggle(
+                    title: "Allow Cellular Data",
+                    subtitle: "Use cellular for transcription",
+                    isOn: $localSettings.allowCellularTranscription,
+                    icon: "antenna.radiowaves.left.and.right",
+                    color: .green
+                )
+            }
+        }
+    }
+    
+    // MARK: - Services Section
+    
+    private var servicesSection: some View {
+        Section {
+            // OpenAI status
+            ServiceStatusRow(
+                service: .openai,
+                isConfigured: authManager.hasValidOpenAIKey,
+                isAvailable: authManager.hasValidOpenAIKey && networkMonitor.isConnected,
+                onConfigure: { showingAPIKeySetup = true }
+            )
+            
+            // Apple Speech status
+            ServiceStatusRow(
+                service: .apple,
+                isConfigured: appleService.authorizationStatus == .authorized,
+                isAvailable: appleService.isAvailable,
+                onConfigure: {
+                    Task {
+                        await appleService.requestSpeechAuthorization()
                     }
                 }
-                .pickerStyle(.segmented)
-                
-                Text("Higher values process faster but use more battery")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+            )
+            
+        } header: {
+            Text("Service Status")
+        } footer: {
+            Text("OpenAI Whisper provides the highest accuracy. Apple Speech works offline but supports fewer languages.")
         }
     }
     
-    // MARK: - Storage Info Section
+    // MARK: - Storage Section
     
-    private var storageInfoSection: some View {
-        Section("Storage Info") {
-            let storageInfo = getStorageInfo()
-            
-            HStack {
-                Text("Available Storage")
-                Spacer()
-                Text(storageInfo.available)
-                    .foregroundColor(.secondary)
-            }
-            
-            HStack {
-                Text("Estimated Recording Time")
-                Spacer()
-                Text(storageInfo.estimatedTime)
-                    .foregroundColor(.secondary)
-            }
-            
-            HStack {
-                Text("Transcription Cache")
-                Spacer()
-                Text(storageInfo.transcriptionCache)
-                    .foregroundColor(.secondary)
-            }
-            
-            if storageInfo.canCleanupCache {
-                Button("Clear Transcription Cache") {
-                    clearTranscriptionCache()
-                }
-                .foregroundColor(.blue)
-            }
-        }
-    }
-    
-    // MARK: - Advanced Section
-    
-    private var advancedSection: some View {
-        Section("Advanced") {
-            NavigationLink("Transcription Statistics") {
-                TranscriptionStatisticsView()
-            }
-            
-            NavigationLink("Service Diagnostics") {
-                ServiceDiagnosticsView()
-            }
-            
-            Toggle("Developer Mode", isOn: $localSettings.enableDeveloperMode)
-            
-            if localSettings.enableDeveloperMode {
-                Toggle("Detailed Logging", isOn: $localSettings.enableDetailedLogging)
-                
-                Button("Export Debug Logs") {
-                    exportDebugLogs()
-                }
-                .foregroundColor(.blue)
-            }
-        }
-    }
-    
-    // MARK: - Reset Section
-    
-    private var resetSection: some View {
+    private var storageSection: some View {
         Section {
+            StorageInfoRow()
+            
+            Button("Clear Transcription Cache") {
+                clearTranscriptionCache()
+            }
+            .foregroundColor(.blue)
+            
+        } header: {
+            Text("Storage & Performance")
+        }
+    }
+    
+    // MARK: - About Section
+    
+    private var aboutSection: some View {
+        Section {
+            HStack {
+                Text("Version")
+                Spacer()
+                Text(Bundle.main.appVersion)
+                    .foregroundColor(.secondary)
+            }
+            
+            HStack {
+                Text("Build")
+                Spacer()
+                Text(Bundle.main.buildVersion)
+                    .foregroundColor(.secondary)
+            }
+            
             Button("Reset to Defaults", role: .destructive) {
                 showingResetAlert = true
             }
             
-            Button("Clear All Data", role: .destructive) {
-                clearAllData()
-            }
-        } footer: {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("App version: \(Bundle.main.appVersion)")
-                Text("Build: \(Bundle.main.buildVersion)")
-            }
-            .font(.caption)
-            .foregroundColor(.secondary)
+        } header: {
+            Text("About")
         }
     }
     
     // MARK: - Helper Methods
+    
+    private func serviceStatusDot(for service: TranscriptionService) -> some View {
+        Circle()
+            .fill(isServiceAvailable(service) ? Color.green : Color.red)
+            .frame(width: 8, height: 8)
+    }
     
     private func isServiceAvailable(_ service: TranscriptionService) -> Bool {
         switch service {
@@ -495,36 +342,109 @@ struct SettingsView: View {
         case .apple:
             return appleService.isAvailable
         case .localWhisper:
-            return false // Not implemented
+            return false
         case .none:
             return false
         }
     }
     
-    private func serviceUnavailableReason(for service: TranscriptionService) -> String {
-        switch service {
-        case .openai:
-            if !authManager.hasValidOpenAIKey {
-                return "API key required"
-            } else if !networkMonitor.isConnected {
-                return "Network required"
-            } else {
-                return "Unavailable"
+    // MARK: - Actions
+    
+    private func saveSettings() {
+        isLoading = true
+        
+        do {
+            settingsService.updateSettings(localSettings)
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.isLoading = false
+                self.dismiss()
             }
-        case .apple:
-            if appleService.authorizationStatus != .authorized {
-                return "Permission required"
-            } else {
-                return "Unavailable"
-            }
-        case .localWhisper:
-            return "Not implemented"
-        case .none:
-            return "No service"
+        } catch {
+            isLoading = false
+            showError("Failed to save settings: \(error.localizedDescription)")
         }
     }
     
-    private func serviceIcon(for service: TranscriptionService) -> String {
+    private func clearTranscriptionCache() {
+        // Implementation for clearing cache
+        // This would clear segment files and temporary data
+    }
+    
+    private func showError(_ message: String) {
+        errorMessage = message
+        showingError = true
+    }
+}
+
+// MARK: - Supporting Views
+
+struct QuickToggle: View {
+    let title: String
+    let subtitle: String
+    @Binding var isOn: Bool
+    let icon: String
+    let color: Color
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .foregroundColor(color)
+                .frame(width: 24, height: 24)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline)
+                
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            Toggle("", isOn: $isOn)
+                .labelsHidden()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct ServiceStatusRow: View {
+    let service: TranscriptionService
+    let isConfigured: Bool
+    let isAvailable: Bool
+    let onConfigure: () -> Void
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: serviceIcon)
+                .foregroundColor(serviceColor)
+                .frame(width: 24, height: 24)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(service.displayName)
+                    .font(.subheadline)
+                
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundColor(statusColor)
+            }
+            
+            Spacer()
+            
+            if !isConfigured {
+                Button("Setup", action: onConfigure)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            } else {
+                StatusIndicator(isAvailable: isAvailable)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+    
+    private var serviceIcon: String {
         switch service {
         case .openai: return "brain"
         case .apple: return "applelogo"
@@ -533,7 +453,7 @@ struct SettingsView: View {
         }
     }
     
-    private func serviceColor(for service: TranscriptionService) -> Color {
+    private var serviceColor: Color {
         switch service {
         case .openai: return .green
         case .apple: return .blue
@@ -542,73 +462,121 @@ struct SettingsView: View {
         }
     }
     
-    private func getStorageInfo() -> (available: String, estimatedTime: String, transcriptionCache: String, canCleanupCache: Bool) {
-        let fileManager = FileManagerService.shared
-        let availableBytes = fileManager.availableSpace
-        let availableString = ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file)
-        
-        let config = AudioConfiguration(
-            sampleRate: localSettings.audioQuality.sampleRate,
-            bitDepth: localSettings.audioQuality.bitDepth,
-            channels: 1,
-            format: kAudioFormatLinearPCM,
-            quality: localSettings.audioQuality
-        )
-        
-        let estimatedSeconds = AudioQualityService.shared.estimatedRecordingTime(
-            for: config,
-            availableBytes: availableBytes
-        )
-        
-        let estimatedTime = estimatedSeconds.formattedDuration
-        
-        // Calculate transcription cache size
-        let cacheSize = calculateTranscriptionCacheSize()
-        let cacheString = ByteCountFormatter.string(fromByteCount: cacheSize, countStyle: .file)
-        
-        return (availableString, estimatedTime, cacheString, cacheSize > 0)
-    }
-    
-    private func calculateTranscriptionCacheSize() -> Int64 {
-        // Calculate size of segment files and cached data
-        let segmentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(TranscriptionConstants.segmentDirectoryName)
-        
-        do {
-            let files = try FileManager.default.contentsOfDirectory(at: segmentsDirectory, includingPropertiesForKeys: [.fileSizeKey])
-            return files.reduce(0) { total, url in
-                total + (url.fileSize)
-            }
-        } catch {
-            return 0
+    private var statusText: String {
+        if !isConfigured {
+            return "Setup required"
+        } else if isAvailable {
+            return "Available"
+        } else {
+            return "Unavailable"
         }
     }
     
-    // MARK: - Actions
-    
-    private func saveSettings() {
-        settingsService.updateSettings(localSettings)
-        dismiss()
-    }
-    
-    private func clearTranscriptionCache() {
-        // Clear segment files and temporary data
-        AudioSegmentProcessor.shared.cleanupSegmentFiles(for: UUID()) // This would need to be updated to clear all
-        // Clear any other cached transcription data
-    }
-    
-    private func clearAllData() {
-        // This would clear all recordings and transcriptions
-        // Implementation would need confirmation dialog
-    }
-    
-    private func exportDebugLogs() {
-        // Export debug logs for troubleshooting
-        // Implementation would create a log file and share it
+    private var statusColor: Color {
+        if !isConfigured {
+            return .orange
+        } else if isAvailable {
+            return .green
+        } else {
+            return .red
+        }
     }
 }
 
-// MARK: - Supporting Views
+struct StatusIndicator: View {
+    let isAvailable: Bool
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(isAvailable ? Color.green : Color.red)
+                .frame(width: 8, height: 8)
+            
+            Text(isAvailable ? "Ready" : "Offline")
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundColor(isAvailable ? .green : .red)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            Capsule()
+                .fill((isAvailable ? Color.green : Color.red).opacity(0.1))
+        )
+    }
+}
+
+struct StorageInfoRow: View {
+    @State private var storageInfo = getStorageInfo()
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Image(systemName: "internaldrive")
+                    .foregroundColor(.blue)
+                    .frame(width: 24)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Storage")
+                        .font(.subheadline)
+                    
+                    Text("Available: \(storageInfo.available)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+            }
+            
+            // Storage usage bar
+            StorageBar(
+                used: storageInfo.usedPercentage,
+                color: storageInfo.usedPercentage > 0.8 ? .red : (storageInfo.usedPercentage > 0.6 ? .orange : .green)
+            )
+        }
+        .padding(.vertical, 4)
+        .onAppear {
+            storageInfo = StorageInfoRow.getStorageInfo()
+        }
+    }
+    
+    private static func getStorageInfo() -> (available: String, usedPercentage: Double) {
+        let fileManager = FileManagerService.shared
+        let availableBytes = fileManager.availableSpace
+        let totalBytes = AudioFileManager.shared.totalStorageSpace()
+        let usedBytes = totalBytes - availableBytes
+        
+        let availableString = ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file)
+        let usedPercentage = totalBytes > 0 ? Double(usedBytes) / Double(totalBytes) : 0
+        
+        return (availableString, usedPercentage)
+    }
+}
+
+struct StorageBar: View {
+    let used: Double
+    let color: Color
+    
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                // Background
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color(.systemGray5))
+                    .frame(height: 6)
+                
+                // Used portion
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(color)
+                    .frame(width: geometry.size.width * used, height: 6)
+                    .animation(.smooth(duration: 0.5), value: used)
+            }
+        }
+        .frame(height: 6)
+    }
+}
+
+// MARK: - API Key Configuration View
 
 struct APIKeyConfigurationView: View {
     @State private var apiKey = ""
@@ -621,35 +589,37 @@ struct APIKeyConfigurationView: View {
     
     var body: some View {
         NavigationView {
-            VStack(spacing: 24) {
+            VStack(spacing: 32) {
                 // Header
-                VStack(spacing: 8) {
+                VStack(spacing: 16) {
                     Image(systemName: "key.fill")
                         .font(.system(size: 48))
                         .foregroundColor(.blue)
                     
-                    Text("OpenAI API Key")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                    
-                    Text("Your API key is stored securely on your device and never shared.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
+                    VStack(spacing: 8) {
+                        Text("OpenAI API Key")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                        
+                        Text("Your API key is stored securely on your device and never shared.")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
                 }
                 
-                // API Key Input
-                VStack(alignment: .leading, spacing: 8) {
+                // Input section
+                VStack(spacing: 16) {
                     HStack {
-                        if showingKey {
-                            TextField("sk-...", text: $apiKey)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(.body, design: .monospaced))
-                        } else {
-                            SecureField("sk-...", text: $apiKey)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(.body, design: .monospaced))
+                        Group {
+                            if showingKey {
+                                TextField("sk-...", text: $apiKey)
+                            } else {
+                                SecureField("sk-...", text: $apiKey)
+                            }
                         }
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
                         
                         Button(action: { showingKey.toggle() }) {
                             Image(systemName: showingKey ? "eye.slash" : "eye")
@@ -658,7 +628,7 @@ struct APIKeyConfigurationView: View {
                     }
                     
                     if let result = validationResult {
-                        Text(result)
+                        Label(result, systemImage: authManager.hasValidOpenAIKey ? "checkmark.circle" : "exclamationmark.circle")
                             .font(.caption)
                             .foregroundColor(authManager.hasValidOpenAIKey ? .green : .red)
                     }
@@ -666,34 +636,29 @@ struct APIKeyConfigurationView: View {
                 
                 // Actions
                 VStack(spacing: 12) {
-                    Button("Save & Validate") {
-                        saveAPIKey()
+                    Button(action: saveAPIKey) {
+                        HStack {
+                            if isValidating {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                            }
+                            
+                            Text("Save & Validate")
+                        }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(apiKey.isEmpty || isValidating)
                     .frame(maxWidth: .infinity)
+                    .disabled(apiKey.isEmpty || isValidating)
                     
                     if authManager.hasValidOpenAIKey {
-                        Button("Remove API Key", role: .destructive) {
-                            removeAPIKey()
-                        }
-                        .buttonStyle(.bordered)
-                        .frame(maxWidth: .infinity)
+                        Button("Remove API Key", role: .destructive, action: removeAPIKey)
+                            .buttonStyle(.bordered)
+                            .frame(maxWidth: .infinity)
                     }
                 }
                 
-                // Help
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("How to get an API key:")
-                        .font(.headline)
-                    
-                    Text("1. Visit platform.openai.com\n2. Sign up or log in\n3. Go to API Keys section\n4. Create a new API key\n5. Copy and paste it here")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding()
-                .background(Color(.systemGray6))
-                .cornerRadius(8)
+                // Help section
+                APIKeyHelpView()
                 
                 Spacer()
             }
@@ -702,18 +667,7 @@ struct APIKeyConfigurationView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                }
-                
-                if !apiKey.isEmpty {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button("Save") {
-                            saveAPIKey()
-                        }
-                        .disabled(isValidating)
-                    }
+                    Button("Cancel", action: { dismiss() })
                 }
             }
             .onAppear {
@@ -730,12 +684,11 @@ struct APIKeyConfigurationView: View {
             try authManager.setOpenAIAPIKey(apiKey)
             validationResult = "API key saved successfully"
             
-            // Auto-dismiss after success
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 dismiss()
             }
         } catch {
-            validationResult = "Failed to save API key: \(error.localizedDescription)"
+            validationResult = "Failed to save API key"
         }
         
         isValidating = false
@@ -752,155 +705,75 @@ struct APIKeyConfigurationView: View {
     }
 }
 
-struct TranscriptionHelpView: View {
-    @Environment(\.dismiss) private var dismiss
-    
+struct APIKeyHelpView: View {
     var body: some View {
-        NavigationView {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // Introduction
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("About Transcription")
-                            .font(.title2)
-                            .fontWeight(.semibold)
-                        
-                        Text("Transcription automatically converts your audio recordings to text using advanced AI. This makes your recordings searchable and easier to review.")
-                            .font(.body)
-                    }
-                    
-                    // Services comparison
-                    servicesComparisonSection
-                    
-                    // Privacy section
-                    privacySection
-                    
-                    // Tips section
-                    tipsSection
-                }
-                .padding()
-            }
-            .navigationTitle("Transcription Help")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
-            }
-        }
-    }
-    
-    private var servicesComparisonSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Transcription Services")
+            Text("How to get an API key:")
                 .font(.headline)
             
-            serviceComparisonCard(
-                service: .openai,
-                pros: ["Highest accuracy", "99+ languages", "Handles accents well", "Technical vocabulary"],
-                cons: ["Requires internet", "Requires API key", "Costs per usage"]
-            )
-            
-            serviceComparisonCard(
-                service: .apple,
-                pros: ["Works offline", "Free", "Good privacy", "Fast processing"],
-                cons: ["Fewer languages", "Less accurate", "iOS devices only"]
-            )
-        }
-    }
-    
-    private func serviceComparisonCard(service: TranscriptionService, pros: [String], cons: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: service == .openai ? "brain" : "applelogo")
-                    .foregroundColor(service == .openai ? .green : .blue)
-                Text(service.displayName)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-            }
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Pros:")
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .foregroundColor(.green)
-                
-                ForEach(pros, id: \.self) { pro in
-                    Text("• \(pro)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Cons:")
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .foregroundColor(.orange)
-                
-                ForEach(cons, id: \.self) { con in
-                    Text("• \(con)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+            VStack(alignment: .leading, spacing: 8) {
+                HelpStep(number: 1, text: "Visit platform.openai.com")
+                HelpStep(number: 2, text: "Sign up or log in to your account")
+                HelpStep(number: 3, text: "Navigate to API Keys section")
+                HelpStep(number: 4, text: "Create a new API key")
+                HelpStep(number: 5, text: "Copy and paste it here")
             }
         }
         .padding()
         .background(Color(.systemGray6))
-        .cornerRadius(8)
-    }
-    
-    private var privacySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Privacy & Security")
-                .font(.headline)
-            
-            Text("Your audio recordings are processed according to these privacy principles:")
-                .font(.body)
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text("• OpenAI: Audio sent to OpenAI servers, processed according to their privacy policy")
-                Text("• Apple: Processed locally on your device or Apple servers with privacy protections")
-                Text("• All transcriptions stored locally on your device")
-                Text("• API keys stored securely in iOS Keychain")
-                Text("• You can delete transcriptions at any time")
-            }
-            .font(.caption)
-            .foregroundColor(.secondary)
-        }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(8)
-    }
-    
-    private var tipsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Tips for Better Transcription")
-                .font(.headline)
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text("• Record in a quiet environment")
-                Text("• Speak clearly and at normal pace")
-                Text("• Keep device close to speaker")
-                Text("• Use higher audio quality settings")
-                Text("• Minimize background noise")
-                Text("• For technical terms, consider editing afterward")
-            }
-            .font(.caption)
-            .foregroundColor(.secondary)
-        }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(8)
+        .cornerRadius(12)
     }
 }
 
-// MARK: - Additional Extensions
+struct HelpStep: View {
+    let number: Int
+    let text: String
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(Color.blue)
+                    .frame(width: 24, height: 24)
+                
+                Text("\(number)")
+                    .font(.caption)
+                    .fontWeight(.bold)
+                    .foregroundColor(.white)
+            }
+            
+            Text(text)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            
+            Spacer()
+        }
+    }
+}
+
+// MARK: - Extensions
 
 extension Bundle {
+    var appVersion: String {
+        return infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+    }
+    
     var buildVersion: String {
         return infoDictionary?["CFBundleVersion"] as? String ?? "1"
+    }
+}
+
+extension AudioConfiguration.Quality {
+    var description: String {
+        switch self {
+        case .high:
+            return "\(Int(sampleRate)) Hz, \(bitDepth)-bit"
+        case .medium:
+            return "\(Int(sampleRate)) Hz, \(bitDepth)-bit"
+        case .low:
+            return "\(Int(sampleRate)) Hz, \(bitDepth)-bit"
+        case .custom:
+            return "\(Int(sampleRate)) Hz, \(bitDepth)-bit"
+        }
     }
 }

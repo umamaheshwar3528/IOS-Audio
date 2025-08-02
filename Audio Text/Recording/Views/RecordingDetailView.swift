@@ -3,13 +3,16 @@ import AVFoundation
 
 struct RecordingDetailView: View {
     let session: RecordingSession
+    
     @State private var isPlaying = false
     @State private var audioPlayer: AVAudioPlayer?
     @State private var currentTime: TimeInterval = 0
     @State private var timer: Timer?
     @State private var showingTranscription = false
     @State private var showingAPIKeySetup = false
-    @State private var playbackError: String?
+    @State private var showingError = false
+    @State private var errorMessage = ""
+    @State private var isLoading = false
     
     // Transcription dependencies
     @ObservedObject private var transcriptionManager = TranscriptionManager.shared
@@ -18,31 +21,25 @@ struct RecordingDetailView: View {
     
     var body: some View {
         ScrollView {
-            VStack(spacing: 24) {
-                // Header
+            LazyVStack(spacing: 24) {
+                // Header section
                 headerSection
                 
-                // Audio Info
+                // Audio info cards
                 audioInfoSection
                 
-                // Transcription Section
+                // Transcription section
                 transcriptionSection
                 
-                // Playback Controls
+                // Playback controls
                 if session.fileURL != nil {
-                    playbackControlsSection
+                    playbackSection
                 }
-                
-                // Error Display
-                if let error = playbackError {
-                    errorSection(error)
-                }
-                
-                Spacer(minLength: 50)
             }
             .padding()
         }
         .navigationBarTitleDisplayMode(.inline)
+        .background(Color(.systemGroupedBackground))
         .onDisappear {
             stopPlayback()
         }
@@ -52,423 +49,231 @@ struct RecordingDetailView: View {
         .sheet(isPresented: $showingAPIKeySetup) {
             APIKeyConfigurationView()
         }
+        .alert("Error", isPresented: $showingError) {
+            Button("OK") {}
+        } message: {
+            Text(errorMessage)
+        }
         .onAppear {
             checkAutoTranscription()
         }
         .refreshable {
-            // Force refresh transcription state
             await refreshTranscriptionState()
         }
     }
     
-    // MARK: - View Components
+    // MARK: - Header Section
     
     private var headerSection: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 12) {
             Text(session.title)
                 .font(.title2)
                 .fontWeight(.semibold)
                 .multilineTextAlignment(.center)
             
-            Text(session.startTime, style: .date)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+            HStack(spacing: 16) {
+                Label(session.startTime.formatted(date: .abbreviated, time: .shortened),
+                      systemImage: "calendar")
+                
+                Label(session.formattedDuration, systemImage: "clock")
+            }
+            .font(.subheadline)
+            .foregroundColor(.secondary)
         }
     }
     
+    // MARK: - Audio Info Section
+    
     private var audioInfoSection: some View {
-        VStack(spacing: 16) {
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("Duration")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text(session.formattedDuration)
-                        .font(.title3)
-                        .fontWeight(.medium)
-                }
-                
-                Spacer()
-                
-                VStack(alignment: .trailing) {
-                    Text("File Size")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text(session.formattedFileSize)
-                        .font(.title3)
-                        .fontWeight(.medium)
-                }
-            }
+        LazyVGrid(columns: [
+            GridItem(.flexible()),
+            GridItem(.flexible())
+        ], spacing: 16) {
+            InfoCard(
+                icon: "waveform",
+                title: "Duration",
+                value: session.formattedDuration,
+                color: .blue
+            )
             
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("Quality")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text(session.configuration.quality.rawValue)
-                        .font(.title3)
-                        .fontWeight(.medium)
-                }
-                
-                Spacer()
-                
-                VStack(alignment: .trailing) {
-                    Text("Sample Rate")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text("\(Int(session.configuration.sampleRate)) Hz")
-                        .font(.title3)
-                        .fontWeight(.medium)
-                }
-            }
+            InfoCard(
+                icon: "internaldrive",
+                title: "File Size",
+                value: session.formattedFileSize,
+                color: .green
+            )
+            
+            InfoCard(
+                icon: "dial.high",
+                title: "Quality",
+                value: session.configuration.quality.rawValue.capitalized,
+                color: .orange
+            )
+            
+            InfoCard(
+                icon: "waveform.badge.magnifyingglass",
+                title: "Sample Rate",
+                value: "\(Int(session.configuration.sampleRate / 1000))kHz",
+                color: .purple
+            )
         }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(12)
     }
+    
+    // MARK: - Transcription Section
     
     private var transcriptionSection: some View {
         VStack(spacing: 16) {
-            // Header
-            HStack {
-                Image(systemName: "waveform.badge.magnifyingglass")
-                    .foregroundColor(.blue)
-                
-                Text("Transcription")
-                    .font(.headline)
-                
-                Spacer()
-                
-                transcriptionStatusIndicator
-            }
+            // Header with status
+            transcriptionHeader
             
-            // Content based on transcription state
-            if isTranscribing {
-                // Show progress
-                TranscriptionProgressView(sessionId: session.id)
-            } else if hasTranscription {
-                // Show completed transcription preview
-                transcriptionPreviewSection
-            } else if hasFailedTranscription {
-                // Show failed state with retry option
-                transcriptionFailedSection
-            } else {
-                // Show start transcription option
-                transcriptionStartSection
+            // Content based on state
+            Group {
+                if isTranscribing {
+                    TranscriptionProgressCard(sessionId: session.id)
+                } else if hasTranscription {
+                    TranscriptionPreviewCard(
+                        text: transcriptionText,
+                        job: currentJob,
+                        onViewFull: { showingTranscription = true },
+                        onShare: shareTranscription
+                    )
+                } else if hasFailedTranscription {
+                    TranscriptionFailedCard(
+                        job: currentJob,
+                        onRetry: retryFailedSegments,
+                        onViewPartial: hasPartialTranscription ? { showingTranscription = true } : nil
+                    )
+                } else {
+                    TranscriptionStartCard(
+                        canStart: canStartTranscription,
+                        service: preferredTranscriptionService,
+                        isNetworkConnected: networkMonitor.isConnected,
+                        hasAPIKey: authManager.hasValidOpenAIKey,
+                        onStart: startTranscription,
+                        onConfigureAPI: { showingAPIKeySetup = true }
+                    )
+                }
             }
+            .animation(.smooth(duration: 0.3), value: transcriptionState)
         }
         .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(12)
+        .background(Color(.systemBackground))
+        .cornerRadius(16)
     }
     
-    private var transcriptionStatusIndicator: some View {
+    private var transcriptionHeader: some View {
+        HStack {
+            Image(systemName: "waveform.badge.magnifyingglass")
+                .foregroundColor(.blue)
+                .font(.title3)
+            
+            Text("Transcription")
+                .font(.headline)
+            
+            Spacer()
+            
+            transcriptionStatusBadge
+        }
+    }
+    
+    private var transcriptionStatusBadge: some View {
         Group {
             if isTranscribing {
-                HStack(spacing: 4) {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                    Text("Processing...")
-                        .font(.caption)
-                        .foregroundColor(.blue)
-                }
+                StatusBadge(text: "Processing", color: .blue, isAnimated: true)
             } else if hasTranscription {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                    Text("Complete")
-                        .font(.caption)
-                        .foregroundColor(.green)
-                }
+                StatusBadge(text: "Complete", color: .green)
             } else if hasFailedTranscription {
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                    Text("Failed")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                }
+                StatusBadge(text: "Failed", color: .red)
             }
         }
     }
     
-    private var transcriptionPreviewSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if !transcriptionText.isEmpty {
-                // Preview text (first 300 characters for better preview)
-                let previewText = String(transcriptionText.prefix(300))
-                let hasMore = transcriptionText.count > 300
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(previewText + (hasMore ? "..." : ""))
-                        .font(.body)
-                        .lineLimit(6)
-                        .padding()
-                        .background(Color(.systemBackground))
-                        .cornerRadius(8)
-                        .textSelection(.enabled) // Allow text selection
-                    
-                    // Show transcription stats
-                    HStack {
-                        if let job = currentJob {
-                            Text("\(job.completedSegments) of \(job.totalSegments) segments")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            
-                            Spacer()
-                            
-                            if job.hasFailures {
-                                Text("\(job.failedSegments) failed")
-                                    .font(.caption)
-                                    .foregroundColor(.orange)
-                            }
-                        }
-                        
-                        Text("Words: \(wordCount)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            } else {
-                // Fallback if no text available
-                Text("Transcription completed but no text available")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .padding()
-                    .background(Color(.systemBackground))
-                    .cornerRadius(8)
-            }
-            
-            // Action buttons
-            HStack {
-                Button("View Full Transcription") {
-                    showingTranscription = true
-                }
-                .buttonStyle(.borderedProminent)
-                
-                Spacer()
-                
-                Button(action: shareTranscription) {
-                    Image(systemName: "square.and.arrow.up")
-                }
-                .buttonStyle(.bordered)
-                .disabled(transcriptionText.isEmpty)
-            }
-        }
-    }
+    // MARK: - Playback Section
     
-    private var transcriptionFailedSection: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Image(systemName: "exclamationmark.triangle")
-                    .foregroundColor(.orange)
-                
-                Text("Transcription failed")
-                    .font(.subheadline)
-                    .foregroundColor(.orange)
-                
-                Spacer()
-            }
-            
-            if let job = currentJob {
-                Text("Failed to transcribe \(job.failedSegments) of \(job.totalSegments) segments")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            
-            HStack {
-                Button("Retry Failed Segments") {
-                    retryFailedSegments()
-                }
-                .buttonStyle(.bordered)
-                
-                Spacer()
-                
-                if hasPartialTranscription {
-                    Button("View Partial Results") {
-                        showingTranscription = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            }
-        }
-    }
-    
-    private var transcriptionStartSection: some View {
-        VStack(spacing: 12) {
-            if !canStartTranscription {
-                transcriptionBlockedSection
-            } else {
-                VStack(spacing: 8) {
-                    Text("Convert your audio to text using AI transcription")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                    
-                    // Service indicator
-                    if let preferredService = preferredTranscriptionService {
-                        HStack {
-                            Image(systemName: serviceIcon(for: preferredService))
-                                .foregroundColor(serviceColor(for: preferredService))
-                            
-                            Text("Using \(preferredService.displayName)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            
-                            if preferredService.requiresNetwork && !networkMonitor.isConnected {
-                                Image(systemName: "wifi.slash")
-                                    .foregroundColor(.orange)
-                            }
-                        }
-                    }
-                    
-                    Button("Start Transcription") {
-                        startTranscription()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canStartTranscription)
-                }
-            }
-        }
-    }
-    
-    private var transcriptionBlockedSection: some View {
-        VStack(spacing: 12) {
-            if !authManager.hasValidOpenAIKey && preferredTranscriptionService == .openai {
-                VStack(spacing: 8) {
-                    HStack {
-                        Image(systemName: "key")
-                            .foregroundColor(.orange)
-                        
-                        Text("OpenAI API Key Required")
-                            .font(.subheadline)
-                            .foregroundColor(.orange)
-                    }
-                    
-                    Text("Configure your OpenAI API key to use Whisper transcription")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                    
-                    Button("Configure API Key") {
-                        showingAPIKeySetup = true
-                    }
-                    .buttonStyle(.bordered)
-                }
-            } else if !networkMonitor.isConnected && preferredTranscriptionService?.requiresNetwork == true {
-                VStack(spacing: 8) {
-                    HStack {
-                        Image(systemName: "wifi.slash")
-                            .foregroundColor(.orange)
-                        
-                        Text("Network Required")
-                            .font(.subheadline)
-                            .foregroundColor(.orange)
-                    }
-                    
-                    Text("Connect to Wi-Fi or enable cellular data for transcription")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-            } else {
-                VStack(spacing: 8) {
-                    HStack {
-                        Image(systemName: "exclamationmark.triangle")
-                            .foregroundColor(.red)
-                        
-                        Text("Transcription Unavailable")
-                            .font(.subheadline)
-                            .foregroundColor(.red)
-                    }
-                    
-                    Text("No transcription services are currently available")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-            }
-        }
-    }
-    
-    private var playbackControlsSection: some View {
-        VStack(spacing: 16) {
-            // Audio progress if playing
+    private var playbackSection: some View {
+        VStack(spacing: 20) {
+            // Progress bar (when playing)
             if isPlaying {
-                VStack(spacing: 8) {
-                    HStack {
-                        Text(formatTime(currentTime))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
-                        Spacer()
-                        
-                        Text(formatTime(session.duration))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    ProgressView(value: currentTime, total: session.duration)
-                        .tint(.blue)
-                }
+                playbackProgress
+                    .transition(.scale.combined(with: .opacity))
             }
             
-            HStack(spacing: 30) {
-                // Main play/pause button
-                Button(action: togglePlayback) {
+            // Control buttons
+            playbackControls
+        }
+        .padding()
+        .background(Color(.systemBackground))
+        .cornerRadius(16)
+    }
+    
+    private var playbackProgress: some View {
+        VStack(spacing: 8) {
+            ProgressView(value: currentTime, total: session.duration)
+                .tint(.blue)
+            
+            HStack {
+                Text(formatTime(currentTime))
+                    .font(.caption)
+                    .monospacedDigit()
+                
+                Spacer()
+                
+                Text(formatTime(session.duration))
+                    .font(.caption)
+                    .monospacedDigit()
+            }
+            .foregroundColor(.secondary)
+        }
+    }
+    
+    private var playbackControls: some View {
+        HStack(spacing: 24) {
+            // Play/pause button
+            Button(action: togglePlayback) {
+                ZStack {
+                    Circle()
+                        .fill(Color.blue)
+                        .frame(width: 64, height: 64)
+                    
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                         .font(.title2)
                         .foregroundColor(.white)
                 }
-                .frame(width: 60, height: 60)
-                .background(Circle().fill(session.fileURL != nil ? Color.blue : Color.gray))
-                .disabled(session.fileURL == nil)
-                
-                // Share recording button
-                Button(action: shareRecording) {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.title2)
-                }
-                .buttonStyle(ControlButtonStyle(isEnabled: session.fileURL != nil))
-                .disabled(session.fileURL == nil)
-                
-                // View transcription button (only if has transcription)
-                if hasTranscription {
-                    Button(action: { showingTranscription = true }) {
-                        Image(systemName: "doc.text")
-                            .font(.title2)
-                    }
-                    .buttonStyle(ControlButtonStyle(isEnabled: true))
-                }
             }
-        }
-    }
-    
-    private func errorSection(_ error: String) -> some View {
-        HStack {
-            Image(systemName: "exclamationmark.triangle")
-                .foregroundColor(.red)
-            
-            Text(error)
-                .font(.caption)
-                .foregroundColor(.red)
+            .disabled(session.fileURL == nil || isLoading)
+            .scaleEffect(isLoading ? 0.9 : 1.0)
+            .animation(.smooth(duration: 0.2), value: isLoading)
             
             Spacer()
             
-            Button("Dismiss") {
-                playbackError = nil
+            // Share button
+            Button(action: shareRecording) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.title3)
+                    .foregroundColor(.primary)
+                    .frame(width: 44, height: 44)
+                    .background(Color(.systemGray6))
+                    .clipShape(Circle())
             }
-            .buttonStyle(.bordered)
+            .disabled(session.fileURL == nil)
+            
+            // Transcription button (if available)
+            if hasTranscription {
+                Button(action: { showingTranscription = true }) {
+                    Image(systemName: "doc.text")
+                        .font(.title3)
+                        .foregroundColor(.primary)
+                        .frame(width: 44, height: 44)
+                        .background(Color(.systemGray6))
+                        .clipShape(Circle())
+                }
+            }
         }
-        .padding()
-        .background(Color.red.opacity(0.1))
-        .cornerRadius(8)
     }
     
     // MARK: - Computed Properties
     
     private var currentJob: TranscriptionJob? {
-        // First check completed jobs, then active jobs
         transcriptionManager.completedJobs.first { $0.sessionId == session.id } ??
         transcriptionManager.activeJobs.first { $0.sessionId == session.id }
     }
@@ -482,21 +287,14 @@ struct RecordingDetailView: View {
     }
     
     private var hasFailedTranscription: Bool {
-        if let job = currentJob {
-            return job.hasFailures && job.completedSegments == 0
-        }
-        return false
+        currentJob?.hasFailures == true && currentJob?.completedSegments == 0
     }
     
     private var hasPartialTranscription: Bool {
-        if let job = currentJob {
-            return job.hasFailures && job.completedSegments > 0 && !transcriptionText.isEmpty
-        }
-        return false
+        currentJob?.hasFailures == true && currentJob?.completedSegments ?? 0 > 0 && !transcriptionText.isEmpty
     }
     
     private var transcriptionText: String {
-        // Try multiple ways to get transcription text
         if let job = currentJob, !job.fullTranscriptionText.isEmpty {
             return job.fullTranscriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -509,15 +307,8 @@ struct RecordingDetailView: View {
         return ""
     }
     
-    private var wordCount: Int {
-        return transcriptionText.components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .count
-    }
-    
     private var preferredTranscriptionService: TranscriptionService? {
-        let settings = SettingsService.shared.settings
-        return settings.preferredTranscriptionService ?? determineAutoService()
+        SettingsService.shared.settings.preferredTranscriptionService ?? determineAutoService()
     }
     
     private var canStartTranscription: Bool {
@@ -530,7 +321,7 @@ struct RecordingDetailView: View {
             case .apple:
                 return AppleTranscriptionService.shared.isAvailable
             case .localWhisper:
-                return false // Not implemented yet
+                return false
             case .none:
                 return false
             }
@@ -539,76 +330,35 @@ struct RecordingDetailView: View {
         return false
     }
     
-    // MARK: - Helper Methods
-    
-    private func determineAutoService() -> TranscriptionService {
-        if networkMonitor.isConnected && authManager.hasValidOpenAIKey {
-            return .openai
-        } else if AppleTranscriptionService.shared.isAvailable {
-            return .apple
-        } else {
-            return .none
-        }
-    }
-    
-    private func serviceIcon(for service: TranscriptionService) -> String {
-        switch service {
-        case .openai: return "brain"
-        case .apple: return "applelogo"
-        case .localWhisper: return "cpu"
-        case .none: return "questionmark"
-        }
-    }
-    
-    private func serviceColor(for service: TranscriptionService) -> Color {
-        switch service {
-        case .openai: return .green
-        case .apple: return .blue
-        case .localWhisper: return .purple
-        case .none: return .gray
-        }
-    }
-    
-    private func checkAutoTranscription() {
-        let settings = SettingsService.shared.settings
-        
-        // Auto-start transcription for new recordings if enabled
-        if settings.enableAutoTranscription &&
-           !hasTranscription &&
-           !isTranscribing &&
-           canStartTranscription {
-            // Check if this is a recent recording (within last hour)
-            if Date().timeIntervalSince(session.startTime) < 3600 {
-                startTranscription()
-            }
-        }
-    }
-    
-    private func refreshTranscriptionState() async {
-        // Force refresh the transcription manager state
-        DispatchQueue.main.async {
-            self.transcriptionManager.objectWillChange.send()
-        }
-    }
-    
-    private func formatTime(_ time: TimeInterval) -> String {
-        let minutes = Int(time) / 60
-        let seconds = Int(time) % 60
-        return String(format: "%d:%02d", minutes, seconds)
+    private var transcriptionState: String {
+        if isTranscribing { return "transcribing" }
+        if hasTranscription { return "complete" }
+        if hasFailedTranscription { return "failed" }
+        return "ready"
     }
     
     // MARK: - Actions
     
     private func startTranscription() {
+        isLoading = true
         let job = transcriptionManager.startTranscriptionJob(for: session)
         Logger.shared.info("Started transcription job: \(job.id)")
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            isLoading = false
+        }
     }
     
     private func retryFailedSegments() {
         guard let job = currentJob else { return }
         
+        isLoading = true
         Task {
             await transcriptionManager.retryFailedSegments(for: job.id)
+            
+            DispatchQueue.main.async {
+                self.isLoading = false
+            }
         }
     }
     
@@ -627,8 +377,6 @@ struct RecordingDetailView: View {
         }
     }
     
-    // MARK: - Playback Methods (Fixed)
-    
     private func togglePlayback() {
         if isPlaying {
             pausePlayback()
@@ -639,51 +387,48 @@ struct RecordingDetailView: View {
     
     private func startPlayback() {
         guard let fileURL = session.fileURL else {
-            playbackError = "Audio file not found"
+            showError("Audio file not found")
             return
         }
         
-        // Check if file exists
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            playbackError = "Audio file no longer exists"
+            showError("Audio file no longer exists")
             return
         }
+        
+        isLoading = true
         
         do {
-            // Configure audio session
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
             try AVAudioSession.sharedInstance().setActive(true)
             
-            // Create and configure audio player
             audioPlayer = try AVAudioPlayer(contentsOf: fileURL)
             audioPlayer?.prepareToPlay()
             audioPlayer?.volume = 1.0
             
-            // Start playback
             let success = audioPlayer?.play() ?? false
             
             if success {
                 isPlaying = true
-                playbackError = nil
+                isLoading = false
                 
-                // Start timer for progress tracking
                 timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
                     if let player = self.audioPlayer {
                         self.currentTime = player.currentTime
                         
-                        // Check if playback finished
                         if !player.isPlaying && player.currentTime >= player.duration {
                             self.stopPlayback()
                         }
                     }
                 }
             } else {
-                playbackError = "Failed to start audio playback"
+                isLoading = false
+                showError("Failed to start audio playback")
             }
             
         } catch {
-            playbackError = "Playback error: \(error.localizedDescription)"
-            Logger.shared.error("Failed to start playback: \(error)")
+            isLoading = false
+            showError("Playback error: \(error.localizedDescription)")
         }
     }
     
@@ -702,18 +447,17 @@ struct RecordingDetailView: View {
         timer = nil
         currentTime = 0
         
-        // Deactivate audio session
         try? AVAudioSession.sharedInstance().setActive(false)
     }
     
     private func shareRecording() {
         guard let fileURL = session.fileURL else {
-            playbackError = "Audio file not found"
+            showError("Audio file not found")
             return
         }
         
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            playbackError = "Audio file no longer exists"
+            showError("Audio file no longer exists")
             return
         }
         
@@ -727,5 +471,385 @@ struct RecordingDetailView: View {
            let rootVC = window.rootViewController {
             rootVC.present(activityVC, animated: true)
         }
+    }
+    
+    private func checkAutoTranscription() {
+        let settings = SettingsService.shared.settings
+        
+        if settings.enableAutoTranscription &&
+           !hasTranscription &&
+           !isTranscribing &&
+           canStartTranscription {
+            if Date().timeIntervalSince(session.startTime) < 3600 {
+                startTranscription()
+            }
+        }
+    }
+    
+    private func refreshTranscriptionState() async {
+        DispatchQueue.main.async {
+            self.transcriptionManager.objectWillChange.send()
+        }
+    }
+    
+    private func determineAutoService() -> TranscriptionService {
+        if networkMonitor.isConnected && authManager.hasValidOpenAIKey {
+            return .openai
+        } else if AppleTranscriptionService.shared.isAvailable {
+            return .apple
+        } else {
+            return .none
+        }
+    }
+    
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+    
+    private func showError(_ message: String) {
+        errorMessage = message
+        showingError = true
+        
+        let impactFeedback = UIImpactFeedbackGenerator(style: .heavy)
+        impactFeedback.impactOccurred()
+    }
+}
+
+// MARK: - Supporting Views
+
+struct InfoCard: View {
+    let icon: String
+    let title: String
+    let value: String
+    let color: Color
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundColor(color)
+                .frame(width: 32, height: 32)
+            
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            Text(value)
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding()
+        .background(Color(.systemBackground))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(color.opacity(0.2), lineWidth: 1)
+        )
+    }
+}
+
+struct StatusBadge: View {
+    let text: String
+    let color: Color
+    let isAnimated: Bool
+    
+    init(text: String, color: Color, isAnimated: Bool = false) {
+        self.text = text
+        self.color = color
+        self.isAnimated = isAnimated
+    }
+    
+    @State private var opacity = 1.0
+    
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .fontWeight(.medium)
+            .foregroundColor(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(color.opacity(0.15))
+            )
+            .opacity(opacity)
+            .onAppear {
+                if isAnimated {
+                    withAnimation(.easeInOut(duration: 1.0).repeatForever()) {
+                        opacity = 0.6
+                    }
+                }
+            }
+    }
+}
+
+struct TranscriptionPreviewCard: View {
+    let text: String
+    let job: TranscriptionJob?
+    let onViewFull: () -> Void
+    let onShare: () -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Preview text
+            let previewText = String(text.prefix(200))
+            Text(previewText + (text.count > 200 ? "..." : ""))
+                .font(.body)
+                .lineLimit(4)
+                .textSelection(.enabled)
+            
+            // Stats
+            if let job = job {
+                HStack {
+                    Label("\(job.completedSegments)/\(job.totalSegments)", systemImage: "waveform")
+                    
+                    Spacer()
+                    
+                    if job.hasFailures {
+                        Label("\(job.failedSegments) failed", systemImage: "exclamationmark.triangle")
+                            .foregroundColor(.orange)
+                    }
+                    
+                    Label("\(wordCount) words", systemImage: "textformat")
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+            
+            // Actions
+            HStack {
+                Button("View Full Text", action: onViewFull)
+                    .buttonStyle(.borderedProminent)
+                
+                Spacer()
+                
+                Button(action: onShare) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.title3)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+    
+    private var wordCount: Int {
+        text.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .count
+    }
+}
+
+struct TranscriptionFailedCard: View {
+    let job: TranscriptionJob?
+    let onRetry: () -> Void
+    let onViewPartial: (() -> Void)?
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundColor(.orange)
+                
+                Text("Transcription failed")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                
+                Spacer()
+            }
+            
+            if let job = job {
+                Text("Failed to transcribe \(job.failedSegments) of \(job.totalSegments) segments")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            HStack {
+                Button("Retry", action: onRetry)
+                    .buttonStyle(.borderedProminent)
+                
+                if let onViewPartial = onViewPartial {
+                    Button("View Partial", action: onViewPartial)
+                        .buttonStyle(.bordered)
+                }
+            }
+        }
+    }
+}
+
+struct TranscriptionStartCard: View {
+    let canStart: Bool
+    let service: TranscriptionService?
+    let isNetworkConnected: Bool
+    let hasAPIKey: Bool
+    let onStart: () -> Void
+    let onConfigureAPI: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            if canStart {
+                // Ready to start
+                VStack(spacing: 8) {
+                    Text("Convert your audio to text using AI transcription")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                    
+                    if let service = service {
+                        ServiceIndicator(service: service, isConnected: isNetworkConnected)
+                    }
+                    
+                    Button("Start Transcription", action: onStart)
+                        .buttonStyle(.borderedProminent)
+                        .frame(maxWidth: .infinity)
+                }
+            } else {
+                // Blocked state
+                VStack(spacing: 8) {
+                    if !hasAPIKey && service == .openai {
+                        ConfigurationRequired(
+                            icon: "key",
+                            title: "OpenAI API Key Required",
+                            message: "Configure your OpenAI API key to use Whisper transcription",
+                            action: onConfigureAPI
+                        )
+                    } else if !isNetworkConnected && service?.requiresNetwork == true {
+                        ConfigurationRequired(
+                            icon: "wifi.slash",
+                            title: "Network Required",
+                            message: "Connect to Wi-Fi or enable cellular data for transcription",
+                            action: nil
+                        )
+                    } else {
+                        ConfigurationRequired(
+                            icon: "exclamationmark.triangle",
+                            title: "Transcription Unavailable",
+                            message: "No transcription services are currently available",
+                            action: nil
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ServiceIndicator: View {
+    let service: TranscriptionService
+    let isConnected: Bool
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: serviceIcon)
+                .foregroundColor(serviceColor)
+            
+            Text("Using \(service.displayName)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            if service.requiresNetwork && !isConnected {
+                Image(systemName: "wifi.slash")
+                    .foregroundColor(.orange)
+                    .font(.caption)
+            }
+        }
+    }
+    
+    private var serviceIcon: String {
+        switch service {
+        case .openai: return "brain"
+        case .apple: return "applelogo"
+        case .localWhisper: return "cpu"
+        case .none: return "questionmark"
+        }
+    }
+    
+    private var serviceColor: Color {
+        switch service {
+        case .openai: return .green
+        case .apple: return .blue
+        case .localWhisper: return .purple
+        case .none: return .gray
+        }
+    }
+}
+
+struct ConfigurationRequired: View {
+    let icon: String
+    let title: String
+    let message: String
+    let action: (() -> Void)?
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Image(systemName: icon)
+                    .foregroundColor(.orange)
+                
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundColor(.orange)
+            }
+            
+            Text(message)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            
+            if let action = action {
+                Button("Configure", action: action)
+                    .buttonStyle(.bordered)
+            }
+        }
+    }
+}
+
+struct TranscriptionProgressCard: View {
+    let sessionId: UUID
+    @ObservedObject private var transcriptionManager = TranscriptionManager.shared
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            if let job = currentJob {
+                ProgressView(value: job.progress)
+                    .tint(.blue)
+                
+                HStack {
+                    Text("\(job.completedSegments) of \(job.totalSegments) segments")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Spacer()
+                    
+                    Text("\(Int(job.progress * 100))%")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.blue)
+                }
+                
+                if job.hasFailures {
+                    Text("\(job.failedSegments) segments failed")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+            } else {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    
+                    Text("Starting transcription...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+    
+    private var currentJob: TranscriptionJob? {
+        transcriptionManager.activeJobs.first { $0.sessionId == sessionId }
     }
 }
